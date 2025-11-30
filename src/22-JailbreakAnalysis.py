@@ -5,7 +5,6 @@
 # All imports are in 01-Imports.py
 ###############################################################################
 
-
 class JailbreakAnalysis:
     """
     Security-critical analysis for jailbreak detector.
@@ -32,10 +31,10 @@ class JailbreakAnalysis:
         self.tokenizer = tokenizer
         self.device = device
 
-        # Reuse existing analyzers (with jailbreak-specific class names)
-        self.confidence_analyzer = ConfidenceAnalyzer(jailbreak_model, tokenizer, device, JAILBREAK_CLASS_NAMES)
-        self.per_model_analyzer = PerModelAnalyzer(jailbreak_model, tokenizer, device, JAILBREAK_CLASS_NAMES)
-        self.attention_viz = AttentionVisualizer(jailbreak_model, tokenizer, device)
+        # Reuse existing analyzers (with jailbreak-specific class names and task_type)
+        self.confidence_analyzer = ConfidenceAnalyzer(jailbreak_model, tokenizer, device, JAILBREAK_CLASS_NAMES, task_type='jailbreak')
+        self.per_model_analyzer = PerModelAnalyzer(jailbreak_model, tokenizer, device, JAILBREAK_CLASS_NAMES, task_type='jailbreak')
+        self.attention_viz = AttentionVisualizer(jailbreak_model, tokenizer, device, JAILBREAK_CLASS_NAMES, task_type='jailbreak')
 
     def analyze_full(self, test_df: pd.DataFrame) -> Dict:
         """
@@ -76,18 +75,29 @@ class JailbreakAnalysis:
 
         # 3. Confidence Analysis
         print("\n--- Confidence Analysis ---")
-        # Create temporary df with 'label' column for analyzer compatibility
-        # Analyzers expect 'label' column, but jailbreak test_df has 'jailbreak_label'
-        test_df_for_analysis = test_df.copy()
-        test_df_for_analysis['label'] = test_df_for_analysis['jailbreak_label']
-
-        conf_results, preds, labels, confidences = self.confidence_analyzer.analyze(test_df_for_analysis)
+        # Analyzers now have task_type='jailbreak' and will auto-detect jailbreak_label
+        conf_results = self.confidence_analyzer.analyze(test_df)
+        
+        # Use cached predictions from earlier inference (line 61)
+        preds = cached_predictions['jailbreak_preds']
+        labels = cached_predictions['jailbreak_labels']
+        confidences = cached_predictions['jailbreak_confidences']
+        
         results['confidence'] = conf_results
-        results['predictions'] = {'preds': preds, 'labels': labels, 'confidences': confidences}
+        results['predictions'] = {'preds': preds, 
+                                    'labels': labels, 
+                                    'confidences': confidences,
+                                    'accuracy': accuracy_score(labels, preds),
+                                    'macro_f1': f1_score(labels, preds, average='macro', zero_division=0),
+                                    'weighted_f1': f1_score(labels, preds, average='weighted', zero_division=0),
+                                    'macro_precision': precision_score(labels, preds, average='macro', zero_division=0),
+                                    'macro_recall': recall_score(labels, preds, average='macro', zero_division=0)
+                                }
+
 
         # 4. Per-Model Analysis (NEW!)
         print("\n--- Per-Model Analysis ---")
-        results['per_model'] = self.per_model_analyzer.analyze(test_df_for_analysis)
+        results['per_model'] = self.per_model_analyzer.analyze(test_df)
 
         # 5. Per-Model Vulnerability
         print("\n--- Per-Model Vulnerability Analysis ---")
@@ -124,8 +134,9 @@ class JailbreakAnalysis:
             results['attention_fn'] = self._analyze_attention_on_failures(results['false_negatives'])
 
         print_banner("✅ JAILBREAK ANALYSIS COMPLETE", width=60, char="=")
-
-        return results
+        
+        return convert_to_serializable(results)
+        #return results
 
     def _run_inference_once(self, test_df: pd.DataFrame) -> Dict:
         """
@@ -165,9 +176,9 @@ class JailbreakAnalysis:
                 preds = torch.argmax(logits, dim=1).cpu().numpy()
                 confidences = torch.max(probs, dim=1)[0].cpu().numpy()
 
-                jailbreak_preds.extend(preds)
-                jailbreak_confidences.extend(confidences)
-                jailbreak_labels.extend(labels.cpu().numpy())  # FIX: Added .cpu() before .numpy()
+                jailbreak_preds.extend(preds.tolist())
+                jailbreak_confidences.extend(confidences.tolist())
+                jailbreak_labels.extend(labels.cpu().numpy().tolist())
 
         # 2. Refusal model inference (for cross-analysis)
         dataset = ClassificationDataset(
@@ -298,7 +309,7 @@ class JailbreakAnalysis:
         kappa = cohen_kappa_score(all_labels, all_preds)
 
         return {
-            'confusion_matrix': cm,
+            'confusion_matrix': cm.tolist(),
             'recall_succeeded': recall_succeeded,  # PRIMARY METRIC
             'precision_succeeded': precision_succeeded,
             'false_negative_rate': fnr,  # CRITICAL - Must be low
@@ -372,7 +383,10 @@ class JailbreakAnalysis:
 
         # Save for review
         if len(false_negatives) > 0:
-            fn_path = os.path.join(quality_review_path, "jailbreak_false_negatives.csv")
+            fn_path = os.path.join(quality_review_path, f"jailbreak_{EXPERIMENT_CONFIG['experiment_name']}_false_negatives.csv")
+            
+            
+            
             # Only include columns that exist
             columns_to_save = ['prompt', 'response', 'model', 'jailbreak_confidence']
             if 'category' in false_negatives.columns:
@@ -788,7 +802,10 @@ class JailbreakAnalysis:
                 serializable_results[key] = f"{len(value)} samples (see jailbreak_false_negatives.csv)"
             elif key == 'predictions':
                 serializable_results[key] = {
-                    'num_samples': len(value['preds'])
+                    'preds': [int(p) for p in value['preds']],        # ✅ Actual predictions
+                    'labels': [int(l) for l in value['labels']],      # ✅ Actual labels
+                    'confidences': [float(c) for c in value['confidences']],  # ✅ Actual confidences
+                    'num_samples': len(value['preds'])                # ✅ Count too
                 }
             elif key == 'cross_analysis':
                 serializable_results[key] = {
@@ -796,10 +813,10 @@ class JailbreakAnalysis:
                     'partial_bypass': int(value['partial_bypass'])
                 }
             elif isinstance(value, dict):
-                serializable_results[key] = value
+                serializable_results[key] = convert_to_serializable(value)
 
         with open(output_path, 'w') as f:
-            json.dump(serializable_results, f, indent=2, default=str)
+            json.dump(serializable_results, f, indent=2)
 
         print(f"✓ Saved jailbreak analysis to {output_path}")
 
