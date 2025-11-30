@@ -203,7 +203,7 @@ class RefusalJailbreakCorrelationAnalyzer:
     # MODULE 3: DISAGREEMENT CASE EXTRACTION
     # =========================================================================
 
-    def extract_disagreement_cases(self, top_k: int = None) -> pd.DataFrame:
+    def extract_disagreement_cases(self, top_k: int = None, timestamp: str = None, classifier_name: str = None) -> pd.DataFrame:
         """
         Extract cases where refusal-derived jailbreak disagrees with actual jailbreak.
 
@@ -301,7 +301,8 @@ class RefusalJailbreakCorrelationAnalyzer:
         print(f"\n{'='*60}\n")
 
         # Save to CSV
-        csv_path = os.path.join(results_path, f"{EXPERIMENT_CONFIG['experiment_name']}_disagreement_cases.csv")
+        csv_path = os.path.join(analysis_results_path, f"{classifier_name}_disagreement_cases_{timestamp}.csv")
+
         df_top.to_csv(csv_path, index=False)
         print(f"✓ Saved disagreement cases to: {csv_path}\n")
 
@@ -346,6 +347,9 @@ class RefusalJailbreakCorrelationAnalyzer:
 
         # Initialize results dictionary
         results = {}
+        
+        # Initialize expected to None (will be set if test can be performed)
+        expected = None
         
         # Check for empty rows or columns
         row_sums = contingency_table.sum(axis=1)
@@ -427,7 +431,7 @@ class RefusalJailbreakCorrelationAnalyzer:
             'degrees_of_freedom': int(dof) if 'dof' in locals() else 0,
             'cramers_v': float(results.get('cramers_v', np.nan)),
             'contingency_table': contingency_table.tolist(),
-            'expected_frequencies': expected.tolist(),
+            'expected_frequencies': expected.tolist() if expected is not None else None,
             'interpretation': interpretation
         }
 
@@ -439,7 +443,7 @@ class RefusalJailbreakCorrelationAnalyzer:
     # MODULE 5: VISUALIZATIONS
     # =========================================================================
 
-    def visualize_correlation(self, save_visualizations: bool = True, output_dir: str = None) -> Dict:
+    def visualize_correlation(self, save_visualizations: bool = True, output_dir: str = None, timestamp: str = None, classifier_name: str = None) -> Dict:
         """
         Create correlation visualizations.
 
@@ -506,7 +510,9 @@ class RefusalJailbreakCorrelationAnalyzer:
         axes[1].set_title('Contingency Table (Row %)', fontsize=14, fontweight='bold')
 
         plt.tight_layout()
-        heatmap_path = os.path.join(output_dir, "correlation_contingency_heatmap.png")
+
+        heatmap_path = os.path.join(output_dir, get_timestamped_filename("contingency_heatmap.png", f"{classifier_name}_correlation", timestamp))
+
         plt.savefig(heatmap_path, dpi=VISUALIZATION_CONFIG['dpi'], bbox_inches='tight')
         plt.close()
         viz_paths['heatmap'] = heatmap_path
@@ -535,7 +541,8 @@ class RefusalJailbreakCorrelationAnalyzer:
                startangle=90)
         ax.set_title('Refusal-Derived vs Actual Jailbreak Agreement', fontsize=14, fontweight='bold')
 
-        pie_path = os.path.join(output_dir, "correlation_agreement_pie.png")
+        pie_path = os.path.join(output_dir, get_timestamped_filename("agreement_pie.png", f"{classifier_name}_correlation", timestamp))
+
         plt.savefig(pie_path, dpi=VISUALIZATION_CONFIG['dpi'], bbox_inches='tight')
         plt.close()
         viz_paths['pie'] = pie_path
@@ -576,7 +583,9 @@ class RefusalJailbreakCorrelationAnalyzer:
         ax.grid(axis='y', alpha=0.3)
 
         plt.tight_layout()
-        bar_path = os.path.join(output_dir, "correlation_stacked_bar.png")
+
+        bar_path = os.path.join(output_dir, get_timestamped_filename("stacked_bar.png", f"{classifier_name}_correlation", timestamp))
+
         plt.savefig(bar_path, dpi=VISUALIZATION_CONFIG['dpi'], bbox_inches='tight')
         plt.close()
         viz_paths['stacked_bar'] = bar_path
@@ -592,7 +601,8 @@ class RefusalJailbreakCorrelationAnalyzer:
     # COMPREHENSIVE ANALYSIS RUNNER
     # =========================================================================
 
-    def run_full_analysis(self, save_visualizations: bool = True, top_k_disagreements: int = None) -> Dict:
+    def run_full_analysis(self, save_visualizations: bool = True, top_k_disagreements: int = None, output_dir: str = None, timestamp: str = None, classifier_name: str = None) -> Dict:
+
         """
         Run all correlation analysis modules.
 
@@ -614,12 +624,15 @@ class RefusalJailbreakCorrelationAnalyzer:
         # Run all modules
         self.calculate_agreement()
         self.analyze_by_refusal_class()
-        self.extract_disagreement_cases(top_k=top_k_disagreements)
+        
+        self.extract_disagreement_cases(top_k=top_k_disagreements, timestamp=timestamp, classifier_name=classifier_name)
+
         self.test_independence()
-        self.visualize_correlation(save_visualizations=save_visualizations)
+        self.visualize_correlation(save_visualizations=save_visualizations, output_dir=output_dir, timestamp=timestamp, classifier_name=classifier_name)
+
 
         # Save results
-        self.save_analysis_results()
+        self.save_analysis_results(timestamp=timestamp, classifier_name=classifier_name)
 
         print(f"\n{'='*60}")
         print("CORRELATION ANALYSIS COMPLETE")
@@ -628,7 +641,8 @@ class RefusalJailbreakCorrelationAnalyzer:
         return self.analysis_results
 
 
-    def save_analysis_results(self, output_path: str = None) -> str:
+    def save_analysis_results(self, output_path: str = None, timestamp: str = None, classifier_name: str = None) -> str:
+
         """
         Save analysis results to pickle file.
 
@@ -640,8 +654,9 @@ class RefusalJailbreakCorrelationAnalyzer:
         """
         if output_path is None:
             output_path = os.path.join(
-                results_path,
-                f"{EXPERIMENT_CONFIG['experiment_name']}_correlation_analysis.pkl"
+                analysis_results_path,
+                f"{classifier_name}_correlation_analysis_{timestamp}.pkl"
+
             )
 
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
