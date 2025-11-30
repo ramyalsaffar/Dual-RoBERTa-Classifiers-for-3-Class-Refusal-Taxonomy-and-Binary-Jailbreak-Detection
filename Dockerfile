@@ -100,7 +100,7 @@ RUN mkdir -p data/{raw,responses,processed,splits} \
 ENV PYTHONPATH=/app/src
 
 # Default command
-CMD ["python", "src/32-Execute.py", "--mode", "full"]
+CMD ["python", "src/32-Execute.py", "--full"]
 
 # =============================================================================
 # STAGE 5: API (Production API)
@@ -136,8 +136,10 @@ RUN python -c "from transformers import RobertaTokenizer, RobertaModel; \
     RobertaModel.from_pretrained('roberta-base')"
 
 # Copy only API-related files
-COPY src/02-Setup.py src/04-Config.py src/15-RefusalClassifier.py \
-     src/16-JailbreakDetector.py src/34-ProductionAPI.py ./src/
+# WHY: Include all dependencies needed by ProductionAPI
+COPY src/01-Imports.py src/02-Setup.py src/03-Utils.py src/04-Config.py \
+     src/15-RefusalClassifier.py src/16-JailbreakDetector.py \
+     src/34-ProductionAPI.py ./src/
 
 # Copy trained models (these should be mounted as volumes in production)
 RUN mkdir -p models

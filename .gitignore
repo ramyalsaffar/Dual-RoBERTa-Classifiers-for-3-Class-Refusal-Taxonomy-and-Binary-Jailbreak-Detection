@@ -208,36 +208,51 @@ __marimo__/
 
 
 # ============================================
-# PROJECT SPECIFIC - Refusal Classifier
+# PROJECT SPECIFIC - Dual RoBERTa Classifiers
 # ============================================
 
-# Data directories (contain large files and API responses)
+# IMPORTANT: Folder naming convention
+# -------------------------------------
+# - Data/ and Reports/ (uppercase) = Permanent storage, TRACKED in git
+# - data/, models/, results/, visualizations/, reports/ (lowercase) = Runtime generated, NOT tracked
+
+# Runtime data directories (generated during pipeline execution)
 data/raw/*.json
 data/responses/*.json
 data/responses/*.csv
 data/processed/*.csv
 data/splits/*.csv
+data/splits/*.pkl
 
-# Model checkpoints (large files)
+# Model checkpoints (large files, runtime generated)
 models/*.pt
 models/*.pth
 models/*.bin
 
-# Results and outputs
+# Runtime results and outputs
 results/*.json
 results/*.csv
+results/*.pkl
 visualizations/*.png
 visualizations/*.pdf
 reports/*.txt
 reports/*.pdf
 
+# Checkpoint files (used for error recovery)
+checkpoints/
+*_checkpoint_*.pkl
+
 # API keys (CRITICAL - never commit!)
 *.key
 *.pem
 secrets/
+credentials.json
 
 # Temporary files
 *.tmp
 *.temp
 .DS_Store
 Thumbs.db
+
+# HuggingFace cache (can be large)
+.cache/huggingface/

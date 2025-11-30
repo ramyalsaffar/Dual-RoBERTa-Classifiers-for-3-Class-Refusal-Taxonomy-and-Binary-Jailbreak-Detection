@@ -90,19 +90,19 @@ services:
     env_file:
       - .env
 
-    command: ["python", "src/32-Execute.py", "--mode", "full"]
+    command: ["python", "src/32-Execute.py", "--full"]
 
   # ===========================================================================
-  # TRAINING (CROSS-VALIDATION)
+  # TRAINING (QUICK TEST)
   # ===========================================================================
-  # WHY: Run Phase 2 cross-validation experiment
-  train-cv:
+  # WHY: Quick test with reduced samples for validation
+  train-test:
     build:
       context: .
       target: production
       dockerfile: Dockerfile
     image: refusal-classifier:train
-    container_name: refusal-classifier-train-cv
+    container_name: refusal-classifier-train-test
 
     deploy:
       resources:
@@ -127,7 +127,7 @@ services:
     env_file:
       - .env
 
-    command: ["python", "src/32-Execute.py", "--mode", "cv", "--k-folds", "5"]
+    command: ["python", "src/32-Execute.py", "--test"]
 
   # ===========================================================================
   # ANALYSIS ONLY

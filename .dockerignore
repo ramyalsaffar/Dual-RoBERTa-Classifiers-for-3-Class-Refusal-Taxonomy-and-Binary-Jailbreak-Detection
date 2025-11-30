@@ -1,4 +1,4 @@
-# Docker Ignore File for 3-Class Refusal Classifier
+# Docker Ignore File for Dual RoBERTa Classifiers
 # Excludes unnecessary files from Docker build context
 # WHY: Faster builds and smaller images by excluding large/unnecessary files
 
@@ -55,11 +55,16 @@ htmlcov/
 # Data Files (exclude from image, mount as volumes)
 # =============================================================================
 # WHY: Data changes frequently, should be mounted as volumes
+# Lowercase folders (runtime generated)
 data/raw/**
 data/responses/**
 data/processed/**
 data/splits/**
 !data/.gitkeep
+
+# Uppercase folders (permanent storage)
+Data/**
+!Data/.gitkeep
 
 # Models (exclude from image, mount as volumes)
 # WHY: Models are large and should be mounted
@@ -77,8 +82,13 @@ visualizations/**
 !visualizations/.gitkeep
 
 # Reports (exclude from image)
+# Lowercase (runtime generated)
 reports/**
 !reports/.gitkeep
+
+# Uppercase (permanent storage)
+Reports/**
+!Reports/.gitkeep
 
 # Logs (exclude from image)
 logs/**
