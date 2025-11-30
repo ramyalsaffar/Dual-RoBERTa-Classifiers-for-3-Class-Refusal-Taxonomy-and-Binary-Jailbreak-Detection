@@ -15,6 +15,27 @@
 ###############################################################################
 
 
+def aggressive_mps_cleanup():
+    """
+    Aggressively clean MPS memory to prevent memory leaks.
+    
+    MPS (Apple Silicon GPU) has known memory leak issues with PyTorch.
+    This function forces synchronization and garbage collection.
+    """
+    # Force garbage collection first
+    gc.collect()
+    
+    # Synchronize and clear MPS cache if available
+    if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+        if hasattr(torch.mps, 'synchronize'):
+            torch.mps.synchronize()
+        if hasattr(torch.mps, 'empty_cache'):
+            torch.mps.empty_cache()
+    
+    # Another round of garbage collection
+    gc.collect()
+
+
 class CrossValidator:
     """
     Enhanced K-Fold Cross-Validation for classification models.
@@ -49,6 +70,14 @@ class CrossValidator:
         """
         self.model_class = model_class
         self.dataset = dataset
+        
+        # Detect model type for proper fallback naming
+        if model_class.__name__ == 'RefusalClassifier':
+            self.model_type = 'refusal'
+        elif model_class.__name__ in ['JailbreakClassifier', 'JailbreakDetector']:
+            self.model_type = 'jailbreak'
+        else:
+            self.model_type = None
         
         # Use config values - NO HARDCODING!
         self.k_folds = k_folds or CROSS_VALIDATION_CONFIG.get('default_folds', 5)
@@ -229,16 +258,21 @@ class CrossValidator:
                 print(f"\n  Fold {fold_idx} completed in {format_time(fold_time)}")
                 print("─" * 60)
 
-            # CRITICAL: Clear GPU memory between folds to prevent OOM
+
+            # CRITICAL: Aggressive memory cleanup between folds to prevent MPS memory leak
             if self.device.type == 'mps':
-                if hasattr(torch, 'mps'):
-                    torch.mps.empty_cache()
+                aggressive_mps_cleanup()
                 if self.verbose:
-                    print("  🧹 Cleared MPS cache")
+                    print("  🧹 Aggressive MPS cleanup complete")
             elif self.device.type == 'cuda':
                 torch.cuda.empty_cache()
+                gc.collect()
                 if self.verbose:
                     print("  🧹 Cleared CUDA cache")
+            else:
+                # CPU - still do garbage collection
+                gc.collect()
+                
         
         # Calculate statistics across folds
         cv_summary = self._calculate_cv_statistics()
@@ -303,7 +337,8 @@ class CrossValidator:
             optimizer=optimizer,
             scheduler=scheduler,
             device=self.device,
-            use_mixed_precision=self.use_mixed_precision
+            use_mixed_precision=self.use_mixed_precision,
+            model_type=self.model_type  # Pass model_type for unambiguous fallback naming
         )
         
         # Model save path
@@ -353,6 +388,7 @@ class CrossValidator:
             report = classification_report(
                 valid_labels,
                 valid_preds,
+                labels=list(range(len(self.class_names))),
                 target_names=self.class_names,
                 output_dict=True,
                 zero_division=0
@@ -368,7 +404,7 @@ class CrossValidator:
             report = {}
             accuracy = f1_macro = f1_weighted = precision_macro = recall_macro = 0.0
         
-        return {
+        result = {
             'accuracy': accuracy,
             'f1_macro': f1_macro,
             'f1_weighted': f1_weighted,
@@ -378,6 +414,17 @@ class CrossValidator:
             'classification_report': report,
             'history': history
         }
+    
+        # CRITICAL: Explicit cleanup to prevent MPS memory leak
+        # Delete large objects before returning
+        del model
+        del trainer
+        del criterion
+        del optimizer
+        del scheduler
+        
+        return result
+
     
     def _store_fold_metrics(self, fold_idx: int, metrics: Dict):
         """Store metrics from a fold."""
@@ -650,12 +697,21 @@ def train_with_cross_validation(full_dataset,
     if class_names is None:
         num_classes = len(set(full_dataset.labels))
         class_names = [f"Class {i}" for i in range(num_classes)]
+    
+    # Detect model type from model_class for proper fallback naming
+    model_type = None
+    if model_class.__name__ == 'RefusalClassifier':
+        model_type = 'refusal'
+    elif model_class.__name__ in ['JailbreakClassifier', 'JailbreakDetector']:
+        model_type = 'jailbreak'
 
     print_banner(f"CROSS-VALIDATION TRAINING PIPELINE ({k_folds}-FOLD)", width=60, char='#')
     print(f"  Total samples: {len(full_dataset):,}")
     print(f"  Test split: {test_split:.1%}")
     print(f"  CV folds: {k_folds}")
     print(f"  Classes: {len(class_names)}")
+    if model_type:
+        print(f"  Model type: {model_type}")
     print(f"#" * 60)
 
     # Step 1: Split into train+val (for CV) and test (held out)
@@ -789,7 +845,8 @@ def train_with_cross_validation(full_dataset,
         criterion,
         optimizer,
         scheduler,
-        DEVICE
+        DEVICE,
+        model_type=model_type  # Pass model_type for unambiguous fallback naming
     )
 
     # Save path
@@ -869,10 +926,35 @@ def train_with_cross_validation(full_dataset,
 
     print(f"\n  Per-Class Performance:")
     for i, class_name in enumerate(class_names):
-        print(f"    {class_name}:")
-        print(f"      F1: {test_f1_per_class[i]:.4f}")
-        print(f"      Precision: {test_precision_per_class[i]:.4f}")
-        print(f"      Recall: {test_recall_per_class[i]:.4f}")
+        # Only print metrics if class exists in test set
+        if i < len(test_f1_per_class):
+            print(f"    {class_name}:")
+            print(f"      F1: {test_f1_per_class[i]:.4f}")
+            print(f"      Precision: {test_precision_per_class[i]:.4f}")
+            print(f"      Recall: {test_recall_per_class[i]:.4f}")
+        else:
+            print(f"    {class_name}:")
+            print(f"      No samples in test set")
+
+    
+    # CRITICAL: Add cv_results to the saved checkpoint
+    # The Trainer already saved the model, but it doesn't know about cv_results
+    # So we reload the checkpoint, add cv_results, and save it again
+    if save_final_model and final_model_path:
+        print(f"\n💾 Adding CV results to checkpoint...")
+        checkpoint = torch.load(final_model_path, map_location='cpu')
+        checkpoint['cv_results'] = cv_summary  # Add CV results
+        
+        checkpoint['split_info'] = {
+            'train_val_size': len(train_val_dataset),
+            'test_size': len(test_dataset),
+            'train_val_indices': train_val_idx.tolist(),
+            'test_indices': test_idx.tolist()
+        }
+        
+        torch.save(checkpoint, final_model_path)
+        print(f"✓ CV results saved to checkpoint")
+
 
     # Return complete results
     results = {
@@ -883,9 +965,9 @@ def train_with_cross_validation(full_dataset,
             'f1_weighted': test_f1_weighted,
             'precision_macro': test_precision,
             'recall_macro': test_recall,
-            'f1_per_class': {class_names[i]: float(test_f1_per_class[i]) for i in range(len(class_names))},
-            'precision_per_class': {class_names[i]: float(test_precision_per_class[i]) for i in range(len(class_names))},
-            'recall_per_class': {class_names[i]: float(test_recall_per_class[i]) for i in range(len(class_names))},
+            'f1_per_class': {class_names[i]: float(test_f1_per_class[i]) for i in range(min(len(class_names), len(test_f1_per_class)))},
+            'precision_per_class': {class_names[i]: float(test_precision_per_class[i]) for i in range(min(len(class_names), len(test_precision_per_class)))},
+            'recall_per_class': {class_names[i]: float(test_recall_per_class[i]) for i in range(min(len(class_names), len(test_recall_per_class)))},
             'predictions': all_preds,
             'labels': all_labels,
             'probabilities': all_probs
