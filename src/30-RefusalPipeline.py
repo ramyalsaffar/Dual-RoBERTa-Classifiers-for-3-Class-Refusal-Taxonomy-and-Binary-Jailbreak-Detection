@@ -52,7 +52,53 @@ class RefusalPipeline:
         self.refusal_model = None
         self.jailbreak_model = None
         self.tokenizer = None
+        
+        self.run_timestamp = self._get_run_timestamp()
 
+    def _get_run_timestamp(self) -> str:
+        """
+        Extract timestamp for this run from existing artifacts.
+        
+        Priority order:
+        1. Prompts file (Step 1) - the source of truth for run timestamp
+        2. Model checkpoints (Step 6+) - fallback if prompts deleted
+        3. Current time - only if starting completely fresh
+        
+        This ensures timestamp consistency across resume scenarios.
+        """
+        
+        # PRIORITY 1: Check for prompts file (Step 1 - earliest artifact)
+        prompt_files = glob.glob(os.path.join(data_raw_path, "prompts_*.json"))
+        if prompt_files:
+            # Get most recent prompt file
+            latest_prompt = max(prompt_files, key=os.path.getmtime)
+            # Extract timestamp from filename: prompts_20241124_1430.json
+            match = re.search(r'prompts_(\d{8}_\d{4})\.json', latest_prompt)
+            if match:
+                return match.group(1)
+        
+        # PRIORITY 2: Check for model files (Step 6+ - fallback)
+        models_dirs = glob.glob(os.path.join(base_results_path, "*Models"))
+        if models_dirs:
+            models_dir = models_dirs[0]
+            model_files = glob.glob(os.path.join(models_dir, "*.pt")) + glob.glob(os.path.join(models_dir, "*.pth"))
+            
+            if model_files:
+                # Extract timestamps from ALL files and sort by timestamp value
+                timestamps = []
+                for filepath in model_files:
+                    match = re.search(r'_(\d{8}_\d{4})_', filepath)
+                    if match:
+                        timestamps.append(match.group(1))
+                
+                if timestamps:
+                    # Return the most recent timestamp (highest value)
+                    return max(timestamps)
+        
+        # PRIORITY 3: Generate new timestamp (completely fresh run)
+        return datetime.now().strftime("%Y%m%d_%H%M")
+    
+    
     def detect_available_data(self) -> Dict[str, Dict]:
         """
         Detect available intermediate data files and checkpoints.
@@ -141,31 +187,43 @@ class RefusalPipeline:
                 'step': 7
             }
 
-        # Step 8: Analysis results
+        # Step 8: Adversarial testing results (NEW!)
+        adversarial_files = glob.glob(os.path.join(analysis_results_path, "adversarial_testing_*.json"))
+        if adversarial_files:
+            latest = max(adversarial_files, key=os.path.getmtime)
+            available['adversarial_results'] = {
+                'path': latest,
+                'basename': os.path.basename(latest),
+                'age_hours': (time.time() - os.path.getmtime(latest)) / 3600,
+                'step': 8
+            }
+
+        # Step 9: Analysis results (MOVED from Step 8)
         analysis_files = glob.glob(os.path.join(analysis_results_path, "*_analysis_*.json"))
-        analysis_files += glob.glob(os.path.join(analysis_results_path, "*_testing_*.json"))
+        # Exclude adversarial testing files (they're Step 8 now)
+        analysis_files = [f for f in analysis_files if 'adversarial_testing' not in f]
         if analysis_files:
             latest = max(analysis_files, key=os.path.getmtime)
             available['analysis_results'] = {
                 'path': latest,
                 'basename': f"{len(analysis_files)} analysis files",
                 'age_hours': (time.time() - os.path.getmtime(latest)) / 3600,
-                'step': 8
+                'step': 9
             }
 
-        # Step 9: Visualizations
-        viz_files = glob.glob(os.path.join(visualizations_path, "*.png"))
-        viz_files += glob.glob(os.path.join(visualizations_path, "**/*.png"), recursive=True)
+        # Step 10: Visualizations (MOVED from Step 9)
+        viz_files = glob.glob(os.path.join(reporting_viz_path, "*.png"))
+        viz_files += glob.glob(os.path.join(reporting_viz_path, "**/*.png"), recursive=True)
         if viz_files:
             latest = max(viz_files, key=os.path.getmtime)
             available['visualizations'] = {
                 'path': latest,
                 'basename': f"{len(viz_files)} visualization files",
                 'age_hours': (time.time() - os.path.getmtime(latest)) / 3600,
-                'step': 9
+                'step': 10
             }
 
-        # Step 10: Reports
+        # Step 11: Reports (MOVED from Step 10)
         report_files = glob.glob(os.path.join(reports_path, "*.pdf"))
         if report_files:
             latest = max(report_files, key=os.path.getmtime)
@@ -173,10 +231,11 @@ class RefusalPipeline:
                 'path': latest,
                 'basename': f"{len(report_files)} PDF reports",
                 'age_hours': (time.time() - os.path.getmtime(latest)) / 3600,
-                'step': 10
+                'step': 11
             }
 
         return available
+
 
     def load_data_for_step(self, step: int) -> pd.DataFrame:
         """
@@ -227,6 +286,129 @@ class RefusalPipeline:
 
         return None
 
+    def load_trained_models(self) -> Tuple[Dict, Dict]:
+        """
+        Load pre-trained refusal and jailbreak models from disk.
+        
+        Returns:
+            Tuple of (refusal_cv_results, jailbreak_cv_results) dictionaries
+            containing loaded models and necessary metadata
+        
+        Raises:
+            FileNotFoundError: If either model is missing
+        """
+        available = self.detect_available_data()
+        
+        # Check if both models exist
+        if 'refusal_model' not in available:
+            raise FileNotFoundError(
+                "Refusal model not found. Cannot proceed with analysis.\n"
+                "   Please start from Step 6 (Train Refusal Classifier)"
+            )
+        
+        if 'jailbreak_model' not in available:
+            raise FileNotFoundError(
+                "Jailbreak model not found. Cannot proceed with analysis.\n"
+                "   Please start from Step 7 (Train Jailbreak Detector)"
+            )
+        
+        print_banner("LOADING PRE-TRAINED MODELS", width=60, char="─")
+        
+        # Initialize tokenizer if not already done
+        if self.tokenizer is None:
+            print("📝 Initializing tokenizer...")
+            self.tokenizer = RobertaTokenizer.from_pretrained(MODEL_CONFIG['model_name'])
+        
+        # ═════════════════════════════════════════════════════════════════════
+        # LOAD REFUSAL CLASSIFIER
+        # ═════════════════════════════════════════════════════════════════════
+        
+        refusal_model_path = available['refusal_model']['path']
+        print(f"\n📂 Loading refusal classifier:")
+        print(f"   Path: {os.path.basename(refusal_model_path)}")
+        
+        # Initialize refusal model
+        self.refusal_model = RefusalClassifier(
+            num_classes=MODEL_CONFIG['num_classes'],
+            dropout=MODEL_CONFIG['dropout']
+        ).to(DEVICE)
+        
+        # Load checkpoint
+        checkpoint = safe_load_checkpoint(refusal_model_path, DEVICE)
+        self.refusal_model.load_state_dict(checkpoint['model_state_dict'])
+        self.refusal_model.eval()
+        
+        
+        # Create refusal_cv_results structure (compatible with existing code)
+        refusal_cv_results = {
+            'final_model_path': refusal_model_path,
+            'best_val_f1': checkpoint.get('best_val_f1', 0.0),
+            'best_epoch': checkpoint.get('epoch', 0),
+            'history': checkpoint.get('history', {}),
+            'split_info': checkpoint.get('split_info', {}),  # FIX: Load split sizes
+            'model_loaded': True,
+            'loaded_from_checkpoint': True
+        }
+        
+        print(f"   ✓ Loaded successfully (Best F1: {refusal_cv_results['best_val_f1']:.4f}, Epoch: {refusal_cv_results['best_epoch']})")
+        if refusal_cv_results['split_info']:
+            split_info = refusal_cv_results['split_info']
+            print(f"   ✓ Split info: train_val={split_info.get('train_val_size', 'N/A')}, test={split_info.get('test_size', 'N/A')}")
+
+        
+        # ═════════════════════════════════════════════════════════════════════
+        # LOAD JAILBREAK DETECTOR
+        # ═════════════════════════════════════════════════════════════════════
+        
+        jailbreak_model_path = available['jailbreak_model']['path']
+        print(f"\n📂 Loading jailbreak detector:")
+        print(f"   Path: {os.path.basename(jailbreak_model_path)}")
+        
+        # Initialize jailbreak model
+        self.jailbreak_model = JailbreakClassifier(
+            num_classes=2,  # Binary classification
+            dropout=MODEL_CONFIG['dropout']
+        ).to(DEVICE)
+        
+        # Load checkpoint
+        checkpoint = safe_load_checkpoint(jailbreak_model_path, DEVICE)
+        self.jailbreak_model.load_state_dict(checkpoint['model_state_dict'])
+        self.jailbreak_model.eval()
+        
+        
+        
+        # Create jailbreak_cv_results structure (compatible with existing code)
+        jailbreak_cv_results = {
+            'final_model_path': jailbreak_model_path,
+            'best_val_f1': checkpoint.get('best_val_f1', 0.0),
+            'best_epoch': checkpoint.get('epoch', 0),
+            'history': checkpoint.get('history', {}),
+            'split_info': checkpoint.get('split_info', {}),  # FIX: Load split sizes
+            'model_loaded': True,
+            'loaded_from_checkpoint': True
+        }
+        
+        print(f"   ✓ Loaded successfully (Best F1: {jailbreak_cv_results['best_val_f1']:.4f}, Epoch: {jailbreak_cv_results['best_epoch']})")
+        if jailbreak_cv_results['split_info']:
+            split_info = jailbreak_cv_results['split_info']
+            print(f"   ✓ Split info: train_val={split_info.get('train_val_size', 'N/A')}, test={split_info.get('test_size', 'N/A')}")
+       
+        
+        print("─" * 60)
+        print("✅ Both models loaded successfully")
+        print("─" * 60 + "\n")
+        
+        return refusal_cv_results, jailbreak_cv_results
+    
+    
+    def _save_step_checkpoint(self, step_number: int):
+        """Save pipeline checkpoint after step completes."""
+        CheckpointManager.save_pipeline_checkpoint(
+            step_number=step_number,
+            experiment_name=EXPERIMENT_CONFIG['experiment_name'],
+            timestamp=self.run_timestamp
+        )
+    
     def run_partial_pipeline(self, start_step: int = 1):
         """
         Execute pipeline starting from a specific step.
@@ -244,8 +426,105 @@ class RefusalPipeline:
                 9: Generate Visualizations
                 10: Generate Reports
         """
-        # Generate single timestamp for this run
-        self.run_timestamp = get_timestamp('file')
+
+# =============================================================================
+#         # CRITICAL FIX: When resuming from Step 8+, extract timestamp from existing models
+#         # WHY: Steps 8-10 analyze existing models, so should use model's timestamp, not current time
+#         if start_step >= 8:
+#             # Extract timestamp from existing model files
+#             try:
+#                 refusal_model_pattern = os.path.join(models_path, "*_refusal_best.pt")
+#                 refusal_models = sorted(glob.glob(refusal_model_pattern), key=os.path.getmtime, reverse=True)
+#                 
+#                 if refusal_models:
+#                     model_filename = os.path.basename(refusal_models[0])
+#                     print(f"🔍 DEBUG: Extracting timestamp from: {model_filename}")
+#                     parts = model_filename.split('_')
+#                     
+#                     # Find timestamp pattern (YYYYMMDD_HHMM)
+#                     for i in range(len(parts) - 1):
+#                         if len(parts[i]) == 8 and parts[i].isdigit() and len(parts[i+1]) == 4 and parts[i+1].isdigit():
+#                             self.run_timestamp = f"{parts[i]}_{parts[i+1]}"
+#                             print(f"✓ Extracted timestamp from model: {self.run_timestamp}")
+#                             break
+#                     else:
+#                         # Fallback if pattern not found
+#                         self.run_timestamp = get_timestamp('file')
+#                         print(f"⚠️  Could not extract timestamp, using current: {self.run_timestamp}")
+#                 else:
+#                     # No models found
+#                     self.run_timestamp = get_timestamp('file')
+#                     print(f"⚠️  No models found, using current timestamp: {self.run_timestamp}")
+#             except Exception as e:
+#                 self.run_timestamp = get_timestamp('file')
+#                 print(f"⚠️  Error extracting timestamp: {e}, using current: {self.run_timestamp}")
+#         else:
+#             # For steps < 8 (training steps), generate new timestamp
+#             self.run_timestamp = get_timestamp('file')
+#             print(f"🆕 Generated new timestamp for training: {self.run_timestamp}")
+# =============================================================================
+
+# =============================================================================
+#         if start_step > 1:
+#             # Resuming - load checkpoint
+#             print(f"\n{'='*60}")
+#             print(f"RESUMING FROM STEP {start_step}")
+#             print(f"{'='*60}")
+#             
+#             checkpoint = CheckpointManager.load_pipeline_checkpoint()
+#             
+#             if checkpoint:
+#                 # Restore from checkpoint
+#                 EXPERIMENT_CONFIG['experiment_name'] = checkpoint['experiment_name']
+#                 self.run_timestamp = checkpoint['timestamp']
+#                 
+#                 print(f"Found checkpoint:")
+#                 print(f"  Last step: {checkpoint['step_completed']}")
+#                 print(f"  Experiment: {checkpoint['experiment_name']}")
+#                 print(f"  ✓ RESTORED timestamp: {checkpoint['timestamp']}")
+#             else:
+#                 # No checkpoint - fallback to model extraction
+#                 print(f"⚠️  No checkpoint found, extracting from model...")
+#                 
+#                 try:
+#                     refusal_model_pattern = os.path.join(models_path, "*_refusal_best.pt")
+#                     refusal_models = sorted(glob.glob(refusal_model_pattern), key=os.path.getmtime, reverse=True)
+#                     
+#                     if refusal_models:
+#                         model_filename = os.path.basename(refusal_models[0])
+#                         parts = model_filename.split('_')
+#                         
+#                         # Find timestamp pattern (YYYYMMDD_HHMM)
+#                         for i in range(len(parts) - 1):
+#                             if len(parts[i]) == 8 and parts[i].isdigit() and len(parts[i+1]) == 4 and parts[i+1].isdigit():
+#                                 model_timestamp = f"{parts[i]}_{parts[i+1]}"
+#                                 self.run_timestamp = model_timestamp
+#                                 
+#                                 # Restore experiment name from model timestamp
+#                                 EXPERIMENT_CONFIG['experiment_name'] = f"dual_RoBERTa_classifier_{model_timestamp}"
+#                                 
+#                                 print(f"  ✓ Extracted from model: {model_filename}")
+#                                 print(f"  ✓ Timestamp: {model_timestamp}")
+#                                 break
+#                         else:
+#                             # Pattern not found
+#                             self.run_timestamp = get_timestamp('file')
+#                             print(f"  ⚠️  Using current timestamp: {self.run_timestamp}")
+#                     else:
+#                         # No models found
+#                         self.run_timestamp = get_timestamp('file')
+#                         print(f"  ⚠️  No models found, using current: {self.run_timestamp}")
+#                 except Exception as e:
+#                     self.run_timestamp = get_timestamp('file')
+#                     print(f"  ⚠️  Error: {e}, using current: {self.run_timestamp}")
+#             
+#             print(f"{'='*60}\n")
+#         else:
+#             # Step 1: Fresh start
+#             self.run_timestamp = get_timestamp('file')
+#             print(f"🆕 Starting fresh experiment with timestamp: {self.run_timestamp}")
+# 
+# =============================================================================
 
         print_banner(f"REFUSAL CLASSIFIER - PARTIAL PIPELINE (START: STEP {start_step})", width=60)
         print(f"Experiment: {EXPERIMENT_CONFIG['experiment_name']}")
@@ -254,62 +533,264 @@ class RefusalPipeline:
         print(f"Classifier 2: Jailbreak Detection (2 classes)")
         print("="*60 + "\n")
 
-        # Load data if starting from later step
+# =============================================================================
+#         # Load data if starting from later step
+#         prompts = None
+#         responses_df = None
+#         cleaned_df = None
+#         labeled_df = None
+#         datasets = None
+# =============================================================================
+    
+        
+        # ═════════════════════════════════════════════════════════════════════
+        # STEP 1: GENERATE PROMPTS
+        # ═════════════════════════════════════════════════════════════════════
         prompts = None
-        responses_df = None
-        cleaned_df = None
-        labeled_df = None
-        datasets = None
-
-        # Execute pipeline from specified step
-        if start_step <= 1:
+        
+        if start_step == 1:
             prompts = self.generate_prompts()
-
+            self._save_step_checkpoint(1)
+        
+        # ═════════════════════════════════════════════════════════════════════
+        # STEP 2: COLLECT RESPONSES
+        # ═════════════════════════════════════════════════════════════════════
+        responses_df = None
+        
         if start_step <= 2:
-            if start_step == 2:
-                prompts = self.generate_prompts()  # Need prompts for collection
+            # Need prompts for Step 2
+            if prompts is None:
+                # Load prompts from saved file
+                available = self.detect_available_data()
+                if 'prompts' not in available:
+                    raise FileNotFoundError("No saved prompts found. Please start from Step 1")
+                
+                with open(available['prompts']['path'], 'r') as f:
+                    prompts = json.load(f)
+                print(f"📂 Loaded prompts from: {available['prompts']['basename']}")
+            
             responses_df = self.collect_responses(prompts)
-        elif start_step >= 3:
+            self._save_step_checkpoint(2)
+        else:
+            # Load existing responses
             responses_df = self.load_data_for_step(3)
-
+        
+        # ═════════════════════════════════════════════════════════════════════
+        # STEP 3: CLEAN DATA
+        # ═════════════════════════════════════════════════════════════════════
+        cleaned_df = None
+        
         if start_step <= 3:
+            if responses_df is None:
+                responses_df = self.load_data_for_step(3)
             cleaned_df = self.clean_data(responses_df)
-        elif start_step >= 4:
+            self._save_step_checkpoint(3)
+        else:
             cleaned_df = self.load_data_for_step(4)
-
+        
+        # ═════════════════════════════════════════════════════════════════════
+        # STEP 4: LABEL DATA
+        # ═════════════════════════════════════════════════════════════════════
+        labeled_df = None
+        labeled_df_augmented = None
+        
         if start_step <= 4:
+            if cleaned_df is None:
+                cleaned_df = self.load_data_for_step(4)
             labeled_df = self.label_data(cleaned_df)
             labeled_df_augmented = self.prepare_jailbreak_training_data(labeled_df)
+            self._save_step_checkpoint(4)
         else:
-            # Starting from step 5+: Just load the data, NO step 4.5!
             labeled_df = self.load_data_for_step(5)
-            labeled_df_augmented = labeled_df  # Use as-is (already processed in previous run)
-
+            labeled_df_augmented = labeled_df
+        
+        # ═════════════════════════════════════════════════════════════════════
+        # STEP 5: PREPARE DATASETS
+        # ═════════════════════════════════════════════════════════════════════
+        datasets = None
+        
         if start_step <= 5:
+            if labeled_df_augmented is None:
+                labeled_df = self.load_data_for_step(5)
+                labeled_df_augmented = labeled_df
             datasets = self.prepare_datasets(labeled_df_augmented)
-
-        # Training WITH cross-validation
+            self._save_step_checkpoint(5)
+        
+        # ═════════════════════════════════════════════════════════════════════
+        # STEP 6 & 7: TRAINING (WITH SMART MODEL DETECTION)
+        # ═════════════════════════════════════════════════════════════════════
+        
         refusal_cv_results = None
         jailbreak_cv_results = None
         test_df = None
-
+        
+        # Check if trained models already exist
+        available = self.detect_available_data()
+        models_exist = ('refusal_model' in available and 'jailbreak_model' in available)
+        
+        # STEP 6: Refusal Classifier
         if start_step <= 6:
-            if datasets is None:
-                # Load datasets if we skipped step 5
-                datasets = self.prepare_datasets(labeled_df_augmented)
-            refusal_cv_results = self.train_refusal_classifier(
-                datasets['refusal']['full_dataset']
-            )
-
+            if models_exist and start_step >= 6:
+                # Models exist and starting at/after Step 6: Load them
+                print("\n" + "="*60)
+                print("⚠️  TRAINED MODELS DETECTED")
+                print("="*60)
+                print(f"  Refusal model: {available['refusal_model']['basename']}")
+                print(f"  Jailbreak model: {available['jailbreak_model']['basename']}")
+                print("  Loading existing models instead of retraining...")
+                print("="*60 + "\n")
+                
+                try:
+                    refusal_cv_results, jailbreak_cv_results = self.load_trained_models()
+                except FileNotFoundError as e:
+                    print(f"❌ ERROR: {e}")
+                    return
+            else:
+                # Train refusal classifier
+                if datasets is None:
+                    if labeled_df_augmented is None:
+                        labeled_df = self.load_data_for_step(5)
+                        labeled_df_augmented = labeled_df
+                    datasets = self.prepare_datasets(labeled_df_augmented)
+                
+                refusal_cv_results = self.train_refusal_classifier(
+                    datasets['refusal']['full_dataset']
+                )
+                self._save_step_checkpoint(6)
+                
+                # CRITICAL: Memory cleanup before training second classifier
+                gc.collect()
+                if DEVICE.type == 'mps':
+                    if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+                        if hasattr(torch.mps, 'synchronize'):
+                            torch.mps.synchronize()
+                        if hasattr(torch.mps, 'empty_cache'):
+                            torch.mps.empty_cache()
+                    gc.collect()
+                    print("🧹 MPS memory cleanup between classifiers complete")
+                elif DEVICE.type == 'cuda':
+                    torch.cuda.empty_cache()
+                    gc.collect()
+                    print("🧹 CUDA memory cleanup between classifiers complete")
+                    
+        
+        # STEP 7: Jailbreak Detector  
         if start_step <= 7:
-            if datasets is None:
-                # Load datasets if we skipped step 5
-                datasets = self.prepare_datasets(labeled_df_augmented)
-            jailbreak_cv_results = self.train_jailbreak_detector(
-                datasets['jailbreak']['full_dataset']
-            )
-
-        # Create test_df from CV results
+            if jailbreak_cv_results is None:
+                if models_exist and start_step >= 7 and 'jailbreak_model' in available:
+                    # Jailbreak model exists, load it
+                    print("\n" + "="*60)
+                    print("⚠️  TRAINED JAILBREAK MODEL DETECTED")
+                    print("="*60)
+                    print(f"  Model: {available['jailbreak_model']['basename']}")
+                    print("  Loading existing model...")
+                    print("="*60 + "\n")
+                    
+                    try:
+                        if refusal_cv_results and 'loaded_from_checkpoint' not in refusal_cv_results:
+                            # Refusal was just trained, only load jailbreak
+                            _, jailbreak_cv_results = self.load_trained_models()
+                        else:
+                            # Load both models
+                            refusal_cv_results, jailbreak_cv_results = self.load_trained_models()
+                    except FileNotFoundError as e:
+                        print(f"❌ ERROR: {e}")
+                        return
+                else:
+                    # Train jailbreak detector
+                    if datasets is None:
+                        if labeled_df_augmented is None:
+                            labeled_df = self.load_data_for_step(5)
+                            labeled_df_augmented = labeled_df
+                        datasets = self.prepare_datasets(labeled_df_augmented)
+                    
+                    jailbreak_cv_results = self.train_jailbreak_detector(
+                        datasets['jailbreak']['full_dataset']
+                    )
+                    self._save_step_checkpoint(7)
+        
+        
+        # ═════════════════════════════════════════════════════════════════════
+        # STEP 8: ADVERSARIAL TESTING
+        # ═════════════════════════════════════════════════════════════════════
+        
+        adversarial_results = None
+        
+        # Load models if starting from Step 8+
+        if start_step >= 8:
+            print("\n" + "="*60)
+            print("📦 STEP 8+ REQUIRES TRAINED MODELS")
+            print("="*60)
+            print("  Checking for pre-trained models...")
+            
+            # Load CV results if not already loaded
+            if refusal_cv_results is None or jailbreak_cv_results is None:
+                try:
+                    refusal_cv_results, jailbreak_cv_results = self.load_trained_models()
+                except FileNotFoundError as e:
+                    print(f"\n❌ ERROR: {e}")
+                    print("\n💡 SOLUTION:")
+                    print("   Option 1: Start from Step 6 to train both models")
+                    print("   Option 2: Start from Step 7 if refusal model exists")
+                    print("\n   Exiting pipeline...")
+                    return
+            
+            # Load actual model objects
+            if self.refusal_model is None:
+                print("  Loading refusal classifier model...")
+                refusal_checkpoint = self._find_latest_checkpoint('refusal')
+                if refusal_checkpoint:
+                    self.refusal_model = self._load_model_from_checkpoint(
+                        refusal_checkpoint, 
+                        MODEL_CONFIG, 
+                        'refusal'
+                    )
+                    print(f"  ✓ Loaded refusal model from: {os.path.basename(refusal_checkpoint)}")
+                else:
+                    print("  ❌ No refusal checkpoint found!")
+                    return
+            
+            if self.jailbreak_model is None:
+                print("  Loading jailbreak detector model...")
+                jailbreak_checkpoint = self._find_latest_checkpoint('jailbreak')
+                if jailbreak_checkpoint:
+                    self.jailbreak_model = self._load_model_from_checkpoint(
+                        jailbreak_checkpoint,
+                        JAILBREAK_CONFIG,
+                        'jailbreak'
+                    )
+                    print(f"  ✓ Loaded jailbreak model from: {os.path.basename(jailbreak_checkpoint)}")
+                else:
+                    print("  ❌ No jailbreak checkpoint found!")
+                    return
+            
+            # Extract timestamp from model filename
+            try:
+                refusal_model_pattern = os.path.join(models_path, "*_refusal_best.pt")
+                refusal_models = sorted(glob.glob(refusal_model_pattern), key=os.path.getmtime, reverse=True)
+                
+                if refusal_models:
+                    model_filename = os.path.basename(refusal_models[0])
+                    parts = model_filename.split('_')
+                    
+                    for i in range(len(parts) - 1):
+                        if len(parts[i]) == 8 and parts[i].isdigit() and len(parts[i+1]) == 4 and parts[i+1].isdigit():
+                            self.run_timestamp = f"{parts[i]}_{parts[i+1]}"
+                            print(f"  ✓ Using model timestamp: {self.run_timestamp}")
+                            break
+                    else:
+                        self.run_timestamp = get_timestamp('file')
+                        print(f"  ⚠️  Could not extract timestamp, using current: {self.run_timestamp}")
+            except Exception as e:
+                self.run_timestamp = get_timestamp('file')
+                print(f"  ⚠️  Error extracting timestamp: {e}")
+            
+            # Load labeled_df_augmented if needed
+            if labeled_df_augmented is None:
+                labeled_df = self.load_data_for_step(5)
+                labeled_df_augmented = labeled_df
+        
+        # Create test_df from CV results (needed for Steps 8+)
         if start_step <= 8:
             if refusal_cv_results and jailbreak_cv_results:
                 test_df = self._create_test_df_from_cv_results(
@@ -320,30 +801,531 @@ class RefusalPipeline:
             else:
                 # Fallback: load from datasets if CV results not available
                 test_df = datasets['refusal']['test_df'] if datasets else None
+        
+        # STEP 8: Run Adversarial Testing (Paraphrasing)
+        if start_step <= 8:
+            if test_df is not None and self.refusal_model is not None:
+                adversarial_results = self.run_adversarial_testing(test_df)
+                
+                # Only save checkpoint if step 8 actually ran
+                self._save_step_checkpoint(8)
+            
+            else:
+                print("⚠️  No test data or model available for adversarial testing")
+                print("⚠️  Skipping step 8 - checkpoint NOT saved")
+                adversarial_results = None
+        
+        # ═════════════════════════════════════════════════════════════════════
+        # STEP 9-11: LOAD PREREQUISITES IF RESUMING FROM THESE STEPS
+        # ═════════════════════════════════════════════════════════════════════
+        
+        # If starting from step 9+, ensure we have all prerequisites loaded
+        if start_step >= 9 and start_step <= 11:
+            print("\n" + "="*60)
+            print(f"📦 RESUMING FROM STEP {start_step} - LOADING PREREQUISITES")
+            print("="*60)
+            
+            # Load test_df if not available (needed for steps 9-11)
+            if test_df is None:
+                if refusal_cv_results and jailbreak_cv_results:
+                    if labeled_df_augmented is None:
+                        labeled_df = self.load_data_for_step(5)
+                        labeled_df_augmented = labeled_df
+                    test_df = self._create_test_df_from_cv_results(
+                        refusal_cv_results,
+                        jailbreak_cv_results,
+                        labeled_df_augmented
+                    )
+                    print(f"  ✓ Loaded test_df with {len(test_df)} samples")
+            
+            
+            # ═════════════════════════════════════════════════════════════════════
+            # STEP 10-11: LOAD PREREQUISITES IF RESUMING FROM THESE STEPS
+            # ═════════════════════════════════════════════════════════════════════
+            
+            # If starting from step 10+, ensure we have analysis_results loaded
+            if start_step >= 10:
+                print("\n" + "="*60)
+                print(f"📦 RESUMING FROM STEP {start_step} - LOADING PREREQUISITES")
+                print("="*60)
+                
+                analysis_results = None
+                
+                # Load analysis results if not available (needed for steps 10-11)
+                if analysis_results is None:
+                    analysis_results_files = glob.glob(os.path.join(
+                        analysis_results_path, 
+                        "refusal_jailbreak_analysis_results_complete_*.json"
+                    ))
+                    if analysis_results_files:
+                        latest_analysis = max(analysis_results_files, key=os.path.getmtime)
+                        print(f"  📂 Loading analysis results: {os.path.basename(latest_analysis)}")
+                        with open(latest_analysis, 'r') as f:
+                            analysis_results = json.load(f)
+                        print("  ✓ Analysis results loaded")
+                        
+                        # CRITICAL FIX: Auto-load missing adversarial/correlation data
+                        if not analysis_results.get('adversarial'):
+                            print("  ⚠️  Adversarial data missing - attempting to load...")
+                            adversarial_files = glob.glob(os.path.join(analysis_results_path, "adversarial_testing_*.json"))
+                            if adversarial_files:
+                                latest_adv = max(adversarial_files, key=os.path.getmtime)
+                                with open(latest_adv, 'r') as f:
+                                    analysis_results['adversarial'] = json.load(f)
+                                print(f"  ✓ Loaded adversarial data from {os.path.basename(latest_adv)}")
+                        
+                        if not analysis_results.get('correlation') or len(analysis_results.get('correlation', {})) == 0:
+                            print("  ⚠️  Correlation data missing - attempting to load...")
+                            correlation_files = glob.glob(os.path.join(analysis_results_path, "correlation_correlation_analysis_*.pkl"))
+                            if correlation_files:
+                                latest_corr = max(correlation_files, key=os.path.getmtime)
+                                with open(latest_corr, 'rb') as f:
+                                    analysis_results['correlation'] = pickle.load(f)
+                                print(f"  ✓ Loaded correlation data from {os.path.basename(latest_corr)}")
+                    else:
+                        print("\n  ❌ ERROR: No analysis results found!")
+                        print("  💡 SOLUTION: Start from Step 9")
+                        return
+                
+                # Regenerate figures if starting from step 11
+                if start_step == 11:
+                    if refusal_cv_results and jailbreak_cv_results and analysis_results:
+                        print("  📊 Regenerating visualizations...")
+                        refusal_history = refusal_cv_results.get('history', {})
+                        jailbreak_history = jailbreak_cv_results.get('history', {})
+                        figures = self.generate_visualizations(refusal_history, jailbreak_history, analysis_results)
+                        print("  ✓ Visualizations regenerated")
+                
+                print("="*60 + "\n")
+        
+            
 
+# =============================================================================
+#             # Load analysis results if starting from step 10 or 11
+#             if start_step >= 10:
+#                  analysis_results_files = glob.glob(os.path.join(
+#                      analysis_results_path, 
+#                     "refusal_jailbreak_analysis_results_complete_*.json"
+#                 ))
+#                 
+#                 
+#                 
+#             if analysis_results_files:
+#                     latest_analysis = max(analysis_results_files, key=os.path.getmtime)
+#                     print(f"  📂 Loading analysis results: {os.path.basename(latest_analysis)}")
+#                     with open(latest_analysis, 'r') as f:
+#                         analysis_results = json.load(f)
+#                     print("  ✓ Analysis results loaded")
+#                     
+#                     
+#                     # CRITICAL FIX: Auto-load missing adversarial/correlation data
+#                     # If these are empty/None in complete JSON, try loading separate files
+#                     if not analysis_results.get('adversarial'):
+#                         print("  ⚠️  Adversarial data missing - attempting to load from separate file...")
+#                         adversarial_files = glob.glob(os.path.join(analysis_results_path, "adversarial_testing_*.json"))
+#                         if adversarial_files:
+#                             latest_adv = max(adversarial_files, key=os.path.getmtime)
+#                             with open(latest_adv, 'r') as f:
+#                                 analysis_results['adversarial'] = json.load(f)
+#                             print(f"  ✓ Loaded adversarial data from {os.path.basename(latest_adv)}")
+#                         else:
+#                             print("  ⚠️  No adversarial data found")
+#                     
+#                     if not analysis_results.get('correlation') or len(analysis_results.get('correlation', {})) == 0:
+#                         print("  ⚠️  Correlation data missing - attempting to load from separate file...")
+#                         # FIXED: Search in analysis_results_path, not correlation_viz_path!
+#                         correlation_files = glob.glob(os.path.join(analysis_results_path, "correlation_correlation_analysis_*.pkl"))
+#                         if correlation_files:
+#                             latest_corr = max(correlation_files, key=os.path.getmtime)
+#                             with open(latest_corr, 'rb') as f:
+#                                 analysis_results['correlation'] = pickle.load(f)
+#                             print(f"  ✓ Loaded correlation data from {os.path.basename(latest_corr)}")
+#                         else:
+#                             print("  ⚠️  No correlation data found")
+#                     
+#             else:
+#                     print("\n  ❌ ERROR: No analysis results found!")
+#                     print("  💡 SOLUTION: Start from Step 9 to generate analysis results")
+#                     return
+#             
+#             
+#             # Load/regenerate figures if starting from step 11
+#             if start_step == 11:
+#                 # Must regenerate visualizations (figures aren't saved as objects)
+#                 if analysis_results and refusal_cv_results and jailbreak_cv_results:
+#                     print("  📊 Regenerating visualizations for report generation...")
+#                     refusal_history = refusal_cv_results.get('history', {})
+#                     jailbreak_history = jailbreak_cv_results.get('history', {})
+#                     figures = self.generate_visualizations(
+#                         refusal_history, 
+#                         jailbreak_history, 
+#                         analysis_results
+#                     )
+#                     print("  ✓ Visualizations regenerated")
+#                 else:
+#                     print("\n  ❌ ERROR: Cannot regenerate visualizations!")
+#                     print("  💡 SOLUTION: Start from Step 9 to generate full analysis")
+#                     return
+#             
+#             print("="*60 + "\n")
+# 
+# =============================================================================
+        
+
+        # ═════════════════════════════════════════════════════════════════════
+        # STEP 9: ANALYSES (LOADS ADVERSARIAL RESULTS)
+        # ═════════════════════════════════════════════════════════════════════
+        
+        # Initialize if not already loaded from resume block
+        if start_step < 9:
+            analysis_results = None
+        elif start_step == 9:
+            analysis_results = None  # Will be generated fresh
+        # else: already loaded in resume block above
+        
+        if start_step <= 9:
+            # Load test_df if not already available
+            if test_df is None:
+                if refusal_cv_results and jailbreak_cv_results:
+                    if labeled_df_augmented is None:
+                        labeled_df = self.load_data_for_step(5)
+                        labeled_df_augmented = labeled_df
+                    test_df = self._create_test_df_from_cv_results(
+                        refusal_cv_results,
+                        jailbreak_cv_results,
+                        labeled_df_augmented
+                    )
+            
             if test_df is not None:
-                analysis_results = self.run_analyses(test_df)
+                # Load adversarial results if they weren't just generated
+                if adversarial_results is None and 'adversarial_results' in available:
+                    adversarial_results = self._load_adversarial_results()
+                
+                # Run analyses (with optional adversarial results)
+                analysis_results = self.run_analyses(test_df, adversarial_results)
+                
+                self._save_step_checkpoint(9)
+                
             else:
                 print("⚠️  No test data available for analysis")
                 analysis_results = None
-
-        if start_step <= 9:
-            if refusal_cv_results and jailbreak_cv_results and analysis_results:
-                figures = self.generate_visualizations(refusal_cv_results, jailbreak_cv_results, analysis_results)
-            else:
-                figures = None
-        else:
+        
+        # ═════════════════════════════════════════════════════════════════════
+        # STEP 10: VISUALIZATIONS
+        # ═════════════════════════════════════════════════════════════════════
+        
+        # Initialize if not already loaded from resume block
+        if start_step < 10:
             figures = None
-
+        elif start_step == 10:
+            figures = None  # Will be generated fresh
+        # else: already loaded/generated in resume block above
+        
         if start_step <= 10:
+            if refusal_cv_results and jailbreak_cv_results and analysis_results:
+                refusal_history = refusal_cv_results.get('history', {})
+                jailbreak_history = jailbreak_cv_results.get('history', {})
+                figures = self.generate_visualizations(refusal_history, jailbreak_history, analysis_results)
+                
+                self._save_step_checkpoint(10)
+                
+            else:
+                print("⚠️  Skipping visualizations - missing required data")
+                figures = None
+        
+        # ═════════════════════════════════════════════════════════════════════
+        # STEP 11: REPORTS
+        # ═════════════════════════════════════════════════════════════════════
+        
+        if start_step <= 11:
             if figures and refusal_cv_results and jailbreak_cv_results and analysis_results:
                 self.generate_reports(refusal_cv_results, jailbreak_cv_results, analysis_results, figures)
+                
+                self._save_step_checkpoint(11)
+                
             else:
                 print("⚠️  Skipping report generation - missing required data")
-
+        
         print("\n" + "="*60)
         print(f"✅ PARTIAL PIPELINE COMPLETE (Started from Step {start_step})")
         print("="*60)
+
+# =============================================================================
+#         # Execute pipeline from specified step
+#         if start_step <= 1:
+#             prompts = self.generate_prompts()
+#             self._save_step_checkpoint(1)
+# 
+#         if start_step <= 2:
+#             if start_step == 2:
+#                 prompts = self.generate_prompts()  # Need prompts for collection
+#             responses_df = self.collect_responses(prompts)
+#             self._save_step_checkpoint(2)
+#             
+#         elif start_step >= 3:
+#             responses_df = self.load_data_for_step(3)
+#             
+# 
+#         if start_step <= 3:
+#             cleaned_df = self.clean_data(responses_df)
+#             self._save_step_checkpoint(3)
+#             
+#         elif start_step >= 4:
+#             cleaned_df = self.load_data_for_step(4)
+# 
+#         if start_step <= 4:
+#             labeled_df = self.label_data(cleaned_df)
+#             labeled_df_augmented = self.prepare_jailbreak_training_data(labeled_df)
+#             self._save_step_checkpoint(4)
+#             
+#         else:
+#             # Starting from step 5+: Just load the data, NO step 4.5!
+#             labeled_df = self.load_data_for_step(5)
+#             labeled_df_augmented = labeled_df  # Use as-is (already processed in previous run)
+# 
+#         if start_step <= 5:
+#             datasets = self.prepare_datasets(labeled_df_augmented)
+#             self._save_step_checkpoint(5)
+# 
+#         # ═════════════════════════════════════════════════════════════════════
+#         # STEP 6 & 7: TRAINING (WITH SMART MODEL DETECTION)
+#         # ═════════════════════════════════════════════════════════════════════
+#         
+#         refusal_cv_results = None
+#         jailbreak_cv_results = None
+#         test_df = None
+#         
+#         # CRITICAL: Check if trained models already exist BEFORE training!
+#         available = self.detect_available_data()
+#         models_exist = ('refusal_model' in available and 'jailbreak_model' in available)
+#         
+#         # STEP 6: Refusal Classifier
+#         if start_step <= 6:
+#             if models_exist and start_step >= 6:
+#                 # Models already exist! Load them instead of retraining
+#                 print("\n" + "="*60)
+#                 print("⚠️  TRAINED MODELS DETECTED")
+#                 print("="*60)
+#                 print(f"  Refusal model: {available['refusal_model']['basename']}")
+#                 print(f"  Jailbreak model: {available['jailbreak_model']['basename']}")
+#                 print("\n  These models were trained in a previous run.")
+#                 print("  Loading existing models instead of retraining...")
+#                 print("="*60 + "\n")
+#                 
+#                 try:
+#                     refusal_cv_results, jailbreak_cv_results = self.load_trained_models()
+#                 except FileNotFoundError as e:
+#                     print(f"❌ ERROR: {e}")
+#                     return
+#             else:
+#                 # No models exist OR explicitly starting from Step 6 → Train
+#                 if datasets is None:
+#                     # Load datasets if we skipped step 5
+#                     datasets = self.prepare_datasets(labeled_df_augmented)
+#                 refusal_cv_results = self.train_refusal_classifier(
+#                     datasets['refusal']['full_dataset']
+#                 )
+#                 self._save_step_checkpoint(6)
+#         
+#         # STEP 7: Jailbreak Detector  
+#         if start_step <= 7:
+#             # Only train if we haven't already loaded models in Step 6
+#             if jailbreak_cv_results is None:
+#                 if models_exist and start_step >= 7 and 'jailbreak_model' in available:
+#                     # Jailbreak model exists but wasn't loaded yet
+#                     print("\n" + "="*60)
+#                     print("⚠️  TRAINED JAILBREAK MODEL DETECTED")
+#                     print("="*60)
+#                     print(f"  Model: {available['jailbreak_model']['basename']}")
+#                     print("  Loading existing model instead of retraining...")
+#                     print("="*60 + "\n")
+#                     
+#                     try:
+#                         # Load only jailbreak model if refusal was just trained
+#                         if refusal_cv_results and 'loaded_from_checkpoint' not in refusal_cv_results:
+#                             # Refusal was just trained, only load jailbreak
+#                             _, jailbreak_cv_results = self.load_trained_models()
+#                         else:
+#                             # Load both (though refusal might be redundant)
+#                             refusal_cv_results, jailbreak_cv_results = self.load_trained_models()
+#                     except FileNotFoundError as e:
+#                         print(f"❌ ERROR: {e}")
+#                         return
+#                 else:
+#                     # No jailbreak model exists OR explicitly starting from Step 7 → Train
+#                     if datasets is None:
+#                         # Load datasets if we skipped step 5
+#                         datasets = self.prepare_datasets(labeled_df_augmented)
+#                     jailbreak_cv_results = self.train_jailbreak_detector(
+#                         datasets['jailbreak']['full_dataset']
+#                     )
+#                     self._save_step_checkpoint(7)
+#         
+#         
+#         # ═════════════════════════════════════════════════════════════════════
+#         # STEP 8: ADVERSARIAL TESTING (NEW SEPARATE STEP!)
+#         # ═════════════════════════════════════════════════════════════════════
+#         
+#         adversarial_results = None
+#         
+#         # CRITICAL: If starting from Step 8+, ensure models are loaded
+#         if start_step >= 8:
+#             print("\n" + "="*60)
+#             print("📦 STEP 8+ REQUIRES TRAINED MODELS")
+#             print("="*60)
+#             print("  Checking for pre-trained models...")
+#             
+#             # Load CV results if not already loaded
+#             if refusal_cv_results is None or jailbreak_cv_results is None:
+#                 try:
+#                     refusal_cv_results, jailbreak_cv_results = self.load_trained_models()
+#                 except FileNotFoundError as e:
+#                     print(f"\n❌ ERROR: {e}")
+#                     print("\n💡 SOLUTION:")
+#                     print("   Option 1: Start from Step 6 to train both models")
+#                     print("   Option 2: Start from Step 7 if refusal model exists")
+#                     print("\n   Exiting pipeline...")
+#                     return
+#             
+#             # CRITICAL: Load actual model objects (not just CV results)
+#             if self.refusal_model is None:
+#                 print("  Loading refusal classifier model...")
+#                 refusal_checkpoint = self._find_latest_checkpoint('refusal')
+#                 if refusal_checkpoint:
+#                     self.refusal_model = self._load_model_from_checkpoint(
+#                         refusal_checkpoint, 
+#                         MODEL_CONFIG, 
+#                         'refusal'
+#                     )
+#                     print(f"  ✓ Loaded refusal model from: {os.path.basename(refusal_checkpoint)}")
+#                 else:
+#                     print("  ❌ No refusal checkpoint found!")
+#                     return
+#             
+#             if self.jailbreak_model is None:
+#                 print("  Loading jailbreak detector model...")
+#                 jailbreak_checkpoint = self._find_latest_checkpoint('jailbreak')
+#                 if jailbreak_checkpoint:
+#                     self.jailbreak_model = self._load_model_from_checkpoint(
+#                         jailbreak_checkpoint,
+#                         JAILBREAK_CONFIG,
+#                         'jailbreak'
+#                     )
+#                     print(f"  ✓ Loaded jailbreak model from: {os.path.basename(jailbreak_checkpoint)}")
+#                 else:
+#                     print("  ❌ No jailbreak checkpoint found!")
+#                     return
+#             
+#             # Extract timestamp from model filename (your commented code was correct!)
+#             try:
+#                 refusal_model_pattern = os.path.join(models_path, "*_refusal_best.pt")
+#                 refusal_models = sorted(glob.glob(refusal_model_pattern), key=os.path.getmtime, reverse=True)
+#                 
+#                 if refusal_models:
+#                     model_filename = os.path.basename(refusal_models[0])
+#                     parts = model_filename.split('_')
+#                     
+#                     # Find timestamp pattern (YYYYMMDD_HHMM)
+#                     for i in range(len(parts) - 1):
+#                         if len(parts[i]) == 8 and parts[i].isdigit() and len(parts[i+1]) == 4 and parts[i+1].isdigit():
+#                             self.run_timestamp = f"{parts[i]}_{parts[i+1]}"
+#                             print(f"  ✓ Using model timestamp: {self.run_timestamp}")
+#                             break
+#                     else:
+#                         self.run_timestamp = get_timestamp('file')
+#                         print(f"  ⚠️  Could not extract timestamp, using current: {self.run_timestamp}")
+#             except Exception as e:
+#                 self.run_timestamp = get_timestamp('file')
+#                 print(f"  ⚠️  Error extracting timestamp: {e}")
+#         
+#         # Create test_df from CV results (needed for Steps 8+)
+#         if start_step <= 8:
+#             if refusal_cv_results and jailbreak_cv_results:
+#                 test_df = self._create_test_df_from_cv_results(
+#                     refusal_cv_results,
+#                     jailbreak_cv_results,
+#                     labeled_df_augmented
+#                 )
+#             else:
+#                 # Fallback: load from datasets if CV results not available
+#                 test_df = datasets['refusal']['test_df'] if datasets else None
+#         
+#         # STEP 8: Run Adversarial Testing (Paraphrasing)
+#         if start_step <= 8:
+#             if test_df is not None and self.refusal_model is not None:
+#                 adversarial_results = self.run_adversarial_testing(test_df)
+#             else:
+#                 print("⚠️  No test data or model available for adversarial testing")
+#                 adversarial_results = None
+#             
+#             self._save_step_checkpoint(8)
+#         
+#         # ═════════════════════════════════════════════════════════════════════
+#         # STEP 9: ANALYSES (LOADS ADVERSARIAL RESULTS)
+#         # ═════════════════════════════════════════════════════════════════════
+#         
+#         analysis_results = None
+#         
+#         if start_step <= 9:
+#             # Load test_df if not already available
+#             if test_df is None:
+#                 if refusal_cv_results and jailbreak_cv_results:
+#                     test_df = self._create_test_df_from_cv_results(
+#                         refusal_cv_results,
+#                         jailbreak_cv_results,
+#                         labeled_df_augmented
+#                     )
+#             
+#             if test_df is not None:
+#                 # Load adversarial results if they weren't just generated
+#                 if adversarial_results is None and 'adversarial_results' in available:
+#                     adversarial_results = self._load_adversarial_results()
+#                 
+#                 # Run analyses (with optional adversarial results)
+#                 analysis_results = self.run_analyses(test_df, adversarial_results)
+#                 
+#                 self._save_step_checkpoint(9)
+#                 
+#             else:
+#                 print("⚠️  No test data available for analysis")
+#                 analysis_results = None
+#         
+#         # ═════════════════════════════════════════════════════════════════════
+#         # STEP 10: VISUALIZATIONS
+#         # ═════════════════════════════════════════════════════════════════════
+#         
+#         figures = None
+#         
+#         if start_step <= 10:
+#             if refusal_cv_results and jailbreak_cv_results and analysis_results:
+#                 refusal_history = refusal_cv_results.get('history', {})
+#                 jailbreak_history = jailbreak_cv_results.get('history', {})
+#                 figures = self.generate_visualizations(refusal_history, jailbreak_history, analysis_results)
+#                 
+#                 self._save_step_checkpoint(10)
+#                 
+#             else:
+#                 print("⚠️  Skipping visualizations - missing required data")
+#                 figures = None
+#         
+#         # ═════════════════════════════════════════════════════════════════════
+#         # STEP 11: REPORTS
+#         # ═════════════════════════════════════════════════════════════════════
+#         
+#         if start_step <= 11:
+#             if figures and refusal_cv_results and jailbreak_cv_results and analysis_results:
+#                 self.generate_reports(refusal_cv_results, jailbreak_cv_results, analysis_results, figures)
+#                 
+#                 self._save_step_checkpoint(11)
+#                 
+#             else:
+#                 print("⚠️  Skipping report generation - missing required data")
+# 
+#         print("\n" + "="*60)
+#         print(f"✅ PARTIAL PIPELINE COMPLETE (Started from Step {start_step})")
+#         print("="*60)
+# 
+# =============================================================================
 
     def run_full_pipeline(self):
         """Execute complete pipeline from start to finish."""
@@ -359,33 +1341,78 @@ class RefusalPipeline:
 
         # Step 1: Generate prompts
         prompts = self.generate_prompts()
+        
+        self._save_step_checkpoint(1)
 
         # Step 2: Collect responses
         responses_df = self.collect_responses(prompts)
+        
+        self._save_step_checkpoint(2)
 
         # Step 3: Clean data (remove invalid responses before labeling)
         cleaned_df = self.clean_data(responses_df)
+        
+        self._save_step_checkpoint(3)
 
         # Step 4: Label data (dual-task labeling - only clean data)
         labeled_df = self.label_data(cleaned_df)
+        
+        self._save_step_checkpoint(4)
 
         # Step 4.5: Prepare jailbreak training data (NEW - V09)
         # Supplements with WildJailbreak if insufficient real jailbreak succeeded samples
         labeled_df_augmented = self.prepare_jailbreak_training_data(labeled_df)
 
+
         # Step 5: Prepare datasets for BOTH classifiers
         datasets = self.prepare_datasets(labeled_df_augmented)
-
+        
+        self._save_step_checkpoint(5)
+        
         # Step 6: Train refusal classifier WITH cross-validation
         refusal_cv_results = self.train_refusal_classifier(
             datasets['refusal']['full_dataset']
         )
+
+        self._save_step_checkpoint(6)
+        
+        # CRITICAL: Memory cleanup before training second classifier
+        gc.collect()
+        if DEVICE.type == 'mps':
+            if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+                if hasattr(torch.mps, 'synchronize'):
+                    torch.mps.synchronize()
+                if hasattr(torch.mps, 'empty_cache'):
+                    torch.mps.empty_cache()
+            gc.collect()
+            print("🧹 MPS memory cleanup between classifiers complete")
+        elif DEVICE.type == 'cuda':
+            torch.cuda.empty_cache()
+            gc.collect()
+            print("🧹 CUDA memory cleanup between classifiers complete")
 
         # Step 7: Train jailbreak detector WITH cross-validation
         jailbreak_cv_results = self.train_jailbreak_detector(
             datasets['jailbreak']['full_dataset']
         )
 
+        self._save_step_checkpoint(7)
+        
+        # CRITICAL: Memory cleanup before training second classifier
+        gc.collect()
+        if DEVICE.type == 'mps':
+            if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+                if hasattr(torch.mps, 'synchronize'):
+                    torch.mps.synchronize()
+                if hasattr(torch.mps, 'empty_cache'):
+                    torch.mps.empty_cache()
+            gc.collect()
+            print("🧹 MPS memory cleanup between classifiers complete")
+        elif DEVICE.type == 'cuda':
+            torch.cuda.empty_cache()
+            gc.collect()
+            print("🧹 CUDA memory cleanup between classifiers complete")
+        
         # Create test_df from CV results for analysis
         # CV returns predictions and labels - reconstruct test_df
         test_df = self._create_test_df_from_cv_results(
@@ -394,15 +1421,28 @@ class RefusalPipeline:
             labeled_df_augmented
         )
 
-        # Step 8: Run analyses
-        analysis_results = self.run_analyses(test_df)
+        # Step 8: Run adversarial testing
+        adversarial_results = self.run_adversarial_testing(test_df)
+        
+        self._save_step_checkpoint(8)
 
-        # Step 9: Generate visualizations
-        # Note: CV results include training history from final model
-        figures = self.generate_visualizations(refusal_cv_results, jailbreak_cv_results, analysis_results)
+        # Step 9: Run analyses (with adversarial results)
+        analysis_results = self.run_analyses(test_df, adversarial_results)
+        
+        self._save_step_checkpoint(9)
 
-        # Step 10: Generate reports
+        # Step 10: Generate visualizations
+        refusal_history = refusal_cv_results.get('history', {})
+        jailbreak_history = jailbreak_cv_results.get('history', {})
+        figures = self.generate_visualizations(refusal_history, jailbreak_history, analysis_results)
+        
+        self._save_step_checkpoint(10)
+
+        # Step 11: Generate reports
         self.generate_reports(refusal_cv_results, jailbreak_cv_results, analysis_results, figures)
+
+        self._save_step_checkpoint(11)
+
 
         print("\n" + "="*60)
         print("✅ PIPELINE COMPLETE (DUAL CLASSIFIERS TRAINED)")
@@ -429,7 +1469,7 @@ class RefusalPipeline:
         collector = ResponseCollector(
             self.api_keys['anthropic'],
             self.api_keys['openai'],
-            self.api_keys['google']
+            self.api_keys.get('google', None)
         )
 
         # Use parallel processing if async is enabled
@@ -548,12 +1588,12 @@ class RefusalPipeline:
         timestamp = self.run_timestamp
 
         # Save quality analysis results
-        quality_analysis_path = os.path.join(analysis_results_path, f"labeling_quality_analysis_{timestamp}.json")
+        quality_analysis_path = os.path.join(quality_review_path, f"labeling_quality_analysis_{timestamp}.json")
         quality_analyzer.save_results(quality_results, quality_analysis_path)
 
         # Export low-confidence samples for review
         if quality_results['low_confidence']['low_both_count'] > 0:
-            flagged_samples_path = os.path.join(quality_review_path, f"flagged_samples_for_review_{timestamp}.csv")
+            flagged_samples_path = os.path.join(quality_review_path, f"label_quality_flagged_samples_{timestamp}.csv")
             quality_analyzer.export_flagged_samples(responses_df, flagged_samples_path, threshold=LABELING_CONFIG['low_confidence_threshold'])
 
         # Save labeled data
@@ -809,7 +1849,7 @@ class RefusalPipeline:
 
         # Load the trained model into self.refusal_model for later use
         self.refusal_model = RefusalClassifier(num_classes=len(CLASS_NAMES))
-        checkpoint = torch.load(cv_results['final_model_path'], map_location=DEVICE)
+        checkpoint = safe_load_checkpoint(cv_results['final_model_path'], DEVICE)
         self.refusal_model.load_state_dict(checkpoint['model_state_dict'])
         self.refusal_model = self.refusal_model.to(DEVICE)
         self.refusal_model.eval()
@@ -820,12 +1860,58 @@ class RefusalPipeline:
 
         return cv_results
 
+    def _get_viz_path(self, subdirectory: str, model_type: str, viz_name: str) -> str:
+        """
+        Generate standardized visualization path with SMART subdirectory routing.
+        
+        CRITICAL FIX: Routes core visualizations to main folder, specialized analysis to subfolders.
+        
+        Routing Rules:
+        - Core visualizations (confusion_matrix, training_curves, etc.) → Main visualizations folder
+        - Specialized analysis (attention, SHAP, error, etc.) → Respective subfolders
+        - ALL files get classifier prefix: refusal_ or jailbreak_
+        
+        Args:
+            subdirectory: Target subdirectory path (e.g., reporting_viz_path, error_analysis_path)
+            model_type: Model identifier ('refusal', 'jailbreak', or 'combined')
+            viz_name: Descriptive name of visualization
+        
+        Returns:
+            Full path with standardized filename in appropriate directory
+            
+        Examples:
+            >>> # Core visualization - stays in main folder
+            >>> self._get_viz_path(reporting_viz_path, 'refusal', 'training_curves')
+            '/path/to/Visualizations/refusal_training_curves_20251116.png'
+            
+            >>> # Specialized analysis - goes to subfolder
+            >>> self._get_viz_path(error_analysis_path, 'refusal', 'error_distribution')
+            '/path/to/Visualizations/Error Analysis/refusal_error_distribution_20251116.png'
+        """
+        filename = f"{model_type}_{viz_name}_{self.run_timestamp}.png"
+        
+        # Core visualizations that should stay in main folder (for PDF reports)
+        # These are always called with reporting_viz_path as subdirectory
+        CORE_VISUALIZATIONS = {
+            'confusion_matrix', 'training_curves', 'class_distribution',
+            'per_class_f1', 'per_model_f1', 'confidence_distributions',
+            'adversarial_robustness', 'vulnerability_heatmap', 'vulnerability_comparison'
+        }
+        
+        # If this is a core visualization, keep it in main visualizations folder
+        # All specialized analysis already passes correct subdirectory (error_analysis_path, etc.)
+        return os.path.join(subdirectory, filename)
+
     def _create_test_df_from_cv_results(self, refusal_cv_results: Dict, jailbreak_cv_results: Dict, labeled_df: pd.DataFrame) -> pd.DataFrame:
         """
         Create test DataFrame from CV results for analysis.
 
         CV splits data internally, so we need to extract the test indices
         and reconstruct the test DataFrame with proper columns.
+        
+        Handles two scenarios:
+        1. Models freshly trained: Use split_info['test_indices'] from CV
+        2. Models loaded from checkpoint: Use full labeled_df as test set
 
         Args:
             refusal_cv_results: Refusal classifier CV results
@@ -835,16 +1921,21 @@ class RefusalPipeline:
         Returns:
             Test DataFrame ready for analysis
         """
-        # Get test indices from CV (both should be the same since same random seed)
-        test_indices = refusal_cv_results['split_info']['test_indices']
-
-        # Create test_df from original labeled_df using test indices
-        test_df = labeled_df.iloc[test_indices].copy()
-
+        # Check if we have split_info (freshly trained) or loaded from checkpoint
+        if 'split_info' in refusal_cv_results:
+            # Scenario 1: Models were freshly trained - use test indices from CV
+            test_indices = refusal_cv_results['split_info']['test_indices']
+            test_df = labeled_df.iloc[test_indices].copy()
+            print(f"\n✓ Created test DataFrame from CV split:")
+        else:
+            # Scenario 2: Models loaded from checkpoint - use full labeled_df as test set
+            # This happens when starting from Step 8 (analyze-only)
+            test_df = labeled_df.copy()
+            print(f"\n✓ Using full labeled DataFrame as test set (models loaded from checkpoint):")
+        
         # Add 'label' column for backward compatibility with analysis modules
         test_df['label'] = test_df['refusal_label']
 
-        print(f"\n✓ Created test DataFrame from CV results:")
         print(f"  Test samples: {len(test_df):,}")
         print(f"  Refusal class distribution:")
         for i in range(len(CLASS_NAMES)):
@@ -991,11 +2082,13 @@ class RefusalPipeline:
 
             print(f"{'='*60}\n")
 
+            
             # Save augmented labeled data (with WildJailbreak samples)
             timestamp = self.run_timestamp
             labeled_augmented_path = os.path.join(data_processed_path, f"labeled_responses_{timestamp}.pkl")
             combined_df.to_pickle(labeled_augmented_path)
             print(f"✓ Saved augmented labeled data to {labeled_augmented_path}\n")
+
 
             return combined_df
 
@@ -1078,7 +2171,7 @@ class RefusalPipeline:
 
         # Load the trained model into self.jailbreak_model for later use
         self.jailbreak_model = JailbreakDetector(num_classes=len(JAILBREAK_CLASS_NAMES))
-        checkpoint = torch.load(cv_results['final_model_path'], map_location=DEVICE)
+        checkpoint = safe_load_checkpoint(cv_results['final_model_path'], DEVICE)
         self.jailbreak_model.load_state_dict(checkpoint['model_state_dict'])
         self.jailbreak_model = self.jailbreak_model.to(DEVICE)
         self.jailbreak_model.eval()
@@ -1089,10 +2182,115 @@ class RefusalPipeline:
 
         return cv_results
 
-    def run_analyses(self, test_df: pd.DataFrame) -> Dict:
-        """Step 8: Run all analyses for BOTH classifiers."""
+
+
+    def run_adversarial_testing(self, test_df: pd.DataFrame) -> Dict:
+        """
+        Step 8 (NEW): Run adversarial robustness testing via paraphrasing.
+        
+        This is now a SEPARATE STEP that:
+        1. Checks if results already exist
+        2. If yes, loads and returns them
+        3. If no, runs paraphrasing and saves results
+        
+        Args:
+            test_df: Test DataFrame
+            
+        Returns:
+            Dictionary with adversarial testing results
+        """
         print("\n" + "="*60)
-        print("STEP 8: RUNNING ANALYSES (BOTH CLASSIFIERS)")
+        print("STEP 8: ADVERSARIAL TESTING (PARAPHRASING)")
+        print("="*60)
+        
+        timestamp = self.run_timestamp
+        output_path = os.path.join(analysis_results_path, f"adversarial_testing_{timestamp}.json")
+        
+# =============================================================================
+#         # Check if results already exist
+#         available = self.detect_available_data()
+#         if 'adversarial_results' in available:
+#             existing_path = available['adversarial_results']['path']
+#             age_hours = available['adversarial_results']['age_hours']
+#             
+#             print("\n" + "="*60)
+#             print("📂 EXISTING ADVERSARIAL RESULTS DETECTED")
+#             print("="*60)
+#             print(f"  File: {available['adversarial_results']['basename']}")
+#             print(f"  Age: {age_hours:.1f} hours")
+#             print("\n  Loading existing results instead of re-running paraphrasing...")
+#             print("  (This saves time and API costs!)")
+#             print("="*60 + "\n")
+#             
+#             # Load existing results
+#             with open(existing_path, 'r') as f:
+#                 adv_results = json.load(f)
+#             
+#             print("✅ Loaded existing adversarial testing results")
+#             return adv_results
+# =============================================================================
+        
+        # No existing results - run adversarial testing
+        print("\n  No existing adversarial results found.")
+        print("  Running paraphrasing tests (this may take a while)...\n")
+        
+        adversarial_tester = AdversarialTester(
+            self.refusal_model, self.tokenizer, DEVICE, self.api_keys['openai']
+        )
+        adv_results = adversarial_tester.test_robustness(test_df)
+        
+        # Save results
+        adversarial_tester.save_results(adv_results, output_path)
+        
+        print("\n✅ Adversarial testing complete")
+        return adv_results
+
+
+    def _load_adversarial_results(self) -> Optional[Dict]:
+        """
+        Load existing adversarial testing results.
+        
+        Returns:
+            Dictionary with adversarial results or None if not found
+        """
+        available = self.detect_available_data()
+        
+        if 'adversarial_results' not in available:
+            return None
+        
+        existing_path = available['adversarial_results']['path']
+        
+        print("\n📂 Loading adversarial results from previous run...")
+        print(f"   File: {available['adversarial_results']['basename']}")
+        
+        try:
+            with open(existing_path, 'r') as f:
+                adv_results = json.load(f)
+            print("   ✓ Loaded successfully")
+            return adv_results
+        except Exception as e:
+            print(f"   ⚠️  Failed to load: {e}")
+            return None
+
+
+    def run_analyses(self, test_df: pd.DataFrame, adversarial_results: Dict = None) -> Dict:
+        """
+        Step 9 (MOVED from Step 8): Run all analyses for BOTH classifiers.
+        
+        REFACTORED:
+        - Now accepts adversarial_results as a parameter instead of generating them
+        - If adversarial_results is None, tries to load from disk
+        - If still None, logs a warning but continues with other analyses
+        
+        Args:
+            test_df: Test DataFrame
+            adversarial_results: Optional pre-computed adversarial results
+            
+        Returns:
+            Dictionary with all analysis results
+        """
+        print("\n" + "="*60)
+        print("STEP 9: RUNNING ANALYSES (BOTH CLASSIFIERS)")
         print("="*60)
 
         # Validate models exist
@@ -1182,44 +2380,77 @@ class RefusalPipeline:
 
         # Per-model analysis
         print("\n--- Per-Model Analysis ---")
-        per_model_analyzer = PerModelAnalyzer(self.refusal_model, self.tokenizer, DEVICE)
+        per_model_analyzer = PerModelAnalyzer(self.refusal_model, self.tokenizer, DEVICE, class_names=CLASS_NAMES, task_type='refusal')
         per_model_results = per_model_analyzer.analyze(test_df)
         per_model_analyzer.save_results(
             per_model_results,
-            os.path.join(analysis_results_path, f"per_model_analysis_{timestamp}.json")
+            os.path.join(analysis_results_path, f"refusal_per_model_analysis_{timestamp}.json")
         )
         analysis_results['per_model'] = per_model_results
 
         # Confidence analysis
         print("\n--- Confidence Analysis ---")
-        confidence_analyzer = ConfidenceAnalyzer(self.refusal_model, self.tokenizer, DEVICE)
+        confidence_analyzer = ConfidenceAnalyzer(self.refusal_model, self.tokenizer, DEVICE, class_names=CLASS_NAMES, task_type='refusal')
         conf_results = confidence_analyzer.analyze(test_df)
         confidence_analyzer.save_results(
             conf_results,
-            os.path.join(analysis_results_path, f"confidence_analysis_{timestamp}.json")
+            os.path.join(analysis_results_path, f"refusal_confidence_analysis_{timestamp}.json")
         )
         analysis_results['confidence'] = conf_results
+        
+        
+        # Adversarial Testing Results
+        print("\n--- Adversarial Testing Results ---")
 
-        # Adversarial testing
-        print("\n--- Adversarial Testing ---")
-        adversarial_tester = AdversarialTester(
-            self.refusal_model, self.tokenizer, DEVICE, self.api_keys['openai']
-        )
-        adv_results = adversarial_tester.test_robustness(test_df)
-        adversarial_tester.save_results(
-            adv_results,
-            os.path.join(analysis_results_path, f"adversarial_testing_{timestamp}.json")
-        )
-        analysis_results['adversarial'] = adv_results
-
+        if adversarial_results is not None:
+            # Results provided as parameter (just generated in Step 8)
+            print("  ✓ Using adversarial results from Step 8")
+            analysis_results['adversarial'] = adversarial_results
+        else:
+            # Try to load from disk
+            print("  Checking for existing adversarial results...")
+            adversarial_results = self._load_adversarial_results()
+            
+            if adversarial_results is not None:
+                print("  ✓ Loaded adversarial results from previous run")
+                analysis_results['adversarial'] = adversarial_results
+            else:
+                print("  ⚠️  No adversarial results found")
+                print("      Run Step 8 (Adversarial Testing) to generate them")
+                analysis_results['adversarial'] = None
+                
+        
         # Attention visualization
         print("\n--- Attention Visualization ---")
-        attention_viz = AttentionVisualizer(self.refusal_model, self.tokenizer, DEVICE, class_names=CLASS_NAMES)
+        attention_viz = AttentionVisualizer(self.refusal_model, self.tokenizer, DEVICE, class_names=CLASS_NAMES, task_type='refusal')
         attention_results = attention_viz.analyze_samples(
-            test_df,
-            num_samples=INTERPRETABILITY_CONFIG['attention_samples_per_class']
+        test_df,
+        num_samples=INTERPRETABILITY_CONFIG['attention_samples_per_class'],
+        output_dir=attention_analysis_path,
+        timestamp=timestamp,
+        classifier_name='refusal'
         )
         analysis_results['attention'] = attention_results
+        
+        
+        # Attention visualization - JAILBREAK DETECTOR
+        print("\n--- Attention Visualization (Jailbreak Detector) ---")
+        jailbreak_attention_viz = AttentionVisualizer(
+            self.jailbreak_model, 
+            self.tokenizer, 
+            DEVICE, 
+            class_names=JAILBREAK_CLASS_NAMES, 
+            task_type='jailbreak'
+        )
+        jailbreak_attention_results = jailbreak_attention_viz.analyze_samples(
+        test_df,
+        num_samples=INTERPRETABILITY_CONFIG['attention_samples_per_class'],
+        output_dir=attention_analysis_path,
+        timestamp=timestamp,
+        classifier_name='jailbreak'
+        )
+        analysis_results['jailbreak_attention'] = jailbreak_attention_results
+        
 
         # SHAP analysis (if enabled)
         if INTERPRETABILITY_CONFIG['shap_enabled']:
@@ -1227,8 +2458,11 @@ class RefusalPipeline:
             try:
                 shap_analyzer = ShapAnalyzer(self.refusal_model, self.tokenizer, DEVICE, class_names=CLASS_NAMES)
                 shap_results = shap_analyzer.analyze_samples(
-                    test_df,
-                    num_samples=INTERPRETABILITY_CONFIG['shap_samples']
+                test_df,
+                num_samples=INTERPRETABILITY_CONFIG['shap_samples'],
+                output_dir=shap_analysis_path, 
+                timestamp=timestamp,
+                classifier_name='refusal'
                 )
                 analysis_results['shap'] = shap_results
             except ImportError:
@@ -1253,16 +2487,17 @@ class RefusalPipeline:
             test_df,
             np.array(preds),
             np.array(confidences),
-            output_dir=visualizations_path
+            output_dir=power_law_viz_path,  # FIXED: Use correct subdirectory!
+            timestamp=timestamp  # NEW: Add timestamp to filenames
         )
         analysis_results['power_law'] = power_law_results
 
         # ═══════════════════════════════════════════════════════
         # JAILBREAK DETECTOR ANALYSIS
         # ═══════════════════════════════════════════════════════
-        print("\n" + "="*60)
-        print("JAILBREAK DETECTOR ANALYSIS")
-        print("="*60)
+        #print("\n" + "="*60)
+        #print("JAILBREAK DETECTOR ANALYSIS")
+        #print("="*60)
 
         jailbreak_analyzer = JailbreakAnalysis(
             self.jailbreak_model,
@@ -1288,7 +2523,8 @@ class RefusalPipeline:
             test_df,
             jailbreak_results['predictions']['preds'],
             jailbreak_results['predictions']['confidences'],
-            output_dir=power_law_viz_path
+            output_dir=power_law_viz_path,
+            timestamp=timestamp  # NEW: Add timestamp to filenames
         )
         analysis_results['jailbreak_power_law'] = jailbreak_power_law_results
 
@@ -1308,11 +2544,16 @@ class RefusalPipeline:
             refusal_class_names=CLASS_NAMES,
             jailbreak_class_names=JAILBREAK_CLASS_NAMES
         )
-        correlation_results = correlation_analyzer.run_full_analysis()
+        correlation_results = correlation_analyzer.run_full_analysis(
+                output_dir=correlation_viz_path, 
+                timestamp=timestamp,
+                classifier_name='correlation'  # or 'refusal_jailbreak'
+                )
         correlation_analyzer.save_analysis_results(
-            os.path.join(analysis_results_path, f"correlation_analysis_{timestamp}.pkl")
-        )
-        correlation_analyzer.visualize_correlation(output_dir=correlation_viz_path)
+                timestamp=timestamp,
+                classifier_name='correlation'
+                )
+        
         analysis_results['correlation'] = correlation_results
 
         # ═══════════════════════════════════════════════════════
@@ -1336,7 +2577,9 @@ class RefusalPipeline:
             tokenizer=self.tokenizer,
             device=DEVICE,
             class_names=CLASS_NAMES,
-            task_type='refusal'
+            task_type='refusal',
+            output_dir=error_analysis_path,
+            timestamp=timestamp
         )
         analysis_results['error_analysis_refusal'] = refusal_error_results
 
@@ -1357,7 +2600,9 @@ class RefusalPipeline:
             tokenizer=self.tokenizer,
             device=DEVICE,
             class_names=JAILBREAK_CLASS_NAMES,
-            task_type='jailbreak'
+            task_type='jailbreak',
+            output_dir=error_analysis_path,
+            timestamp=timestamp
         )
         analysis_results['error_analysis_jailbreak'] = jailbreak_error_results
 
@@ -1366,6 +2611,10 @@ class RefusalPipeline:
     def generate_visualizations(self, refusal_history: Dict, jailbreak_history: Dict, analysis_results: Dict):
         """
         Step 9: Generate all visualizations for both classifiers.
+        
+        ALL visualizations are now organized into subdirectories with standardized naming:
+        - Format: {model_type}_{viz_name}_{timestamp}.png
+        - Subdirectories: Main visualization folder for core metrics, specialized folders for advanced analysis
 
         Returns:
             Dictionary of matplotlib figure objects for use in report generation
@@ -1374,75 +2623,154 @@ class RefusalPipeline:
         print("STEP 9: GENERATING VISUALIZATIONS")
         print("="*60)
 
+        # Use run timestamp for all visualizations
+        timestamp = self.run_timestamp
+        
         visualizer = Visualizer()
+        jailbreak_visualizer = Visualizer(class_names=JAILBREAK_CLASS_NAMES)
         figures = {}
 
+        # ═══════════════════════════════════════════════════════════════════
+        # CORE TRAINING VISUALIZATIONS (Main Visualizations Folder)
+        # ═══════════════════════════════════════════════════════════════════
+        
+        print("\n📊 Generating core training visualizations...")
+        
         # Training curves - Refusal Classifier
         figures['refusal_training_curves'] = visualizer.plot_training_curves(
             refusal_history,
-            os.path.join(visualizations_path, "refusal_training_curves.png")
+            self._get_viz_path(reporting_viz_path, 'refusal', 'training_curves')
         )
 
         # Training curves - Jailbreak Detector
-        jailbreak_visualizer = Visualizer(class_names=JAILBREAK_CLASS_NAMES)
         figures['jailbreak_training_curves'] = jailbreak_visualizer.plot_training_curves(
             jailbreak_history,
-            os.path.join(visualizations_path, "jailbreak_training_curves.png")
+            self._get_viz_path(reporting_viz_path, 'jailbreak', 'training_curves')
         )
 
-        # Get predictions and labels
+        # Get predictions and labels for refusal classifier
         preds = analysis_results['predictions']['preds']
         labels = analysis_results['predictions']['labels']
 
-        # Confusion matrix
+        # Confusion matrix - Refusal Classifier
         cm = confusion_matrix(labels, preds)
         figures['confusion_matrix'] = visualizer.plot_confusion_matrix(
             cm,
-            os.path.join(visualizations_path, "confusion_matrix.png")
+            self._get_viz_path(reporting_viz_path, 'refusal', 'confusion_matrix')
         )
 
-        # Class distribution
+        # Class distribution - Refusal Classifier
         figures['class_distribution'] = visualizer.plot_class_distribution(
             labels,
-            os.path.join(visualizations_path, "class_distribution.png")
+            self._get_viz_path(reporting_viz_path, 'refusal', 'class_distribution')
         )
 
-        # Per-class F1
+        # Per-class F1 - Refusal Classifier
         per_class_f1 = {}
-        for class_name, class_data in analysis_results['per_model'].items():
-            if class_name != 'analysis':
-                for cls, f1 in class_data['f1_per_class'].items():
-                    if cls not in per_class_f1:
-                        per_class_f1[cls] = []
-                    per_class_f1[cls].append(f1)
+        if 'models' in analysis_results['per_model']:
+            for model_name, model_data in analysis_results['per_model']['models'].items():
+                if 'f1_per_class' in model_data:
+                    for cls, f1 in model_data['f1_per_class'].items():
+                        if cls not in per_class_f1:
+                            per_class_f1[cls] = []
+                        per_class_f1[cls].append(f1)
 
         avg_per_class_f1 = {cls: np.mean(scores) for cls, scores in per_class_f1.items()}
         visualizer.plot_per_class_f1(
             avg_per_class_f1,
-            os.path.join(visualizations_path, "per_class_f1.png")
+            self._get_viz_path(reporting_viz_path, 'refusal', 'per_class_f1')
         )
 
-        # Per-model F1
+        # Per-model F1 - Shows performance across LLM models (Claude, GPT, Gemini)
         visualizer.plot_per_model_f1(
-            analysis_results['per_model'],
-            os.path.join(visualizations_path, "per_model_f1.png")
+            analysis_results['per_model']['models'],  # FIX: Access 'models' sub-dict
+            self._get_viz_path(reporting_viz_path, 'refusal', 'per_model_f1')
         )
 
-        # Adversarial robustness
-        visualizer.plot_adversarial_robustness(
-            analysis_results['adversarial'],
-            os.path.join(visualizations_path, "adversarial_robustness.png")
-        )
+        # Adversarial robustness - Refusal Classifier (only if results exist)
+        if analysis_results.get('adversarial') is not None:
+            visualizer.plot_adversarial_robustness(
+                analysis_results['adversarial'],
+                self._get_viz_path(reporting_viz_path, 'refusal', 'adversarial_robustness')
+            )
+        else:
+            print("⚠️  Skipping adversarial robustness plot - no results available")
 
-        # Confidence distributions
+        # Confidence distributions - Refusal Classifier
         confidences = analysis_results['predictions']['confidences']
         visualizer.plot_confidence_distributions(
             labels,
             confidences,
-            os.path.join(visualizations_path, "confidence_distributions.png")
+            self._get_viz_path(reporting_viz_path, 'refusal', 'confidence_distributions')
         )
+        
+        print("  ✓ Core visualizations saved to:", reporting_viz_path)
 
-        print("\n✓ All visualizations generated")
+        # ═══════════════════════════════════════════════════════════════════
+        # CORRELATION ANALYSIS (Correlation Analysis Subfolder)
+        # ═══════════════════════════════════════════════════════════════════
+        
+        # Note: Correlation analysis is already generated in run_analyses() at line 1494
+        # It generates its own visualizations with proper subdirectory and naming
+        print("\n📈 Correlation analysis visualizations:")
+        print("  ✓ Already generated in Step 8 (run_analyses)")
+        print(f"  📁 Location: {correlation_viz_path}")
+
+        # ═══════════════════════════════════════════════════════════════════
+        # ERROR ANALYSIS (Error Analysis Subfolder)
+        # ═══════════════════════════════════════════════════════════════════
+        
+        # Note: Error analysis is already generated in run_analyses() at lines 1519, 1541
+        # It generates its own visualizations with proper subdirectory and naming
+        print("\n🔍 Error analysis visualizations:")
+        print("  ✓ Already generated in Step 8 (run_analyses)")
+        print(f"  📁 Location: {error_analysis_path}")
+
+        # ═══════════════════════════════════════════════════════════════════
+        # ATTENTION ANALYSIS (Attention Analysis Subfolder)
+        # ═══════════════════════════════════════════════════════════════════
+        
+        # Note: Attention analysis is already generated in run_analyses() at line 1393
+        # It generates its own visualizations with proper subdirectory and naming
+        print("\n🧠 Attention analysis visualizations:")
+        print("  ✓ Already generated in Step 8 (run_analyses)")
+        print(f"  📁 Location: {attention_analysis_path}")
+
+        # ═══════════════════════════════════════════════════════════════════
+        # SHAP ANALYSIS (SHAP Analysis Subfolder)
+        # ═══════════════════════════════════════════════════════════════════
+        
+        # Note: SHAP analysis is already generated in run_analyses() at line 1405
+        # It generates its own visualizations with proper subdirectory and naming
+        print("\n🔬 SHAP analysis visualizations:")
+        if analysis_results.get('shap') is not None:
+            print("  ✓ Already generated in Step 8 (run_analyses)")
+            print(f"  📁 Location: {shap_analysis_path}")
+        else:
+            print("  ⚠️  SHAP analysis was skipped (disabled or failed)")
+            print(f"  📁 Expected location: {shap_analysis_path}")
+
+        # ═══════════════════════════════════════════════════════════════════
+        # POWER LAW ANALYSIS (Power Law Analysis Subfolder)
+        # ═══════════════════════════════════════════════════════════════════
+        
+        # Note: Power law analysis is already generated in run_analyses() at lines 1429, 1461
+        # It generates its own visualizations with proper subdirectory and naming
+        print("\n📐 Power law analysis visualizations:")
+        print("  ✓ Already generated in Step 8 (run_analyses)")
+        print(f"  📁 Location: {power_law_viz_path}")
+
+        print("\n" + "="*60)
+        print("✅ ALL VISUALIZATIONS ORGANIZED INTO SUBDIRECTORIES")
+        print("="*60)
+        print(f"📁 Main visualizations: {visualizations_path}")
+        print(f"📁 Attention analysis: {attention_analysis_path}")
+        print(f"📁 SHAP analysis: {shap_analysis_path}")
+        print(f"📁 Correlation analysis: {correlation_viz_path}")
+        print(f"📁 Error analysis: {error_analysis_path}")
+        print(f"📁 Power law analysis: {power_law_viz_path}")
+        print("="*60)
+        
         return figures
 
     def generate_reports(self, refusal_history: Dict, jailbreak_history: Dict, analysis_results: Dict, figures: Dict = None):
@@ -1458,6 +2786,13 @@ class RefusalPipeline:
         print("\n" + "="*60)
         print("STEP 10: GENERATING REPORTS")
         print("="*60)
+
+        # Check if reportlab is available
+        if not REPORTLAB_AVAILABLE:
+            print("\n⚠️  PDF report generation disabled - reportlab not installed")
+            print("   Install with: pip install reportlab")
+            print("   Skipping report generation...")
+            return
 
         timestamp = self.run_timestamp
 
@@ -1479,15 +2814,83 @@ class RefusalPipeline:
 
         print("\n--- Generating Refusal Classifier Report ---")
 
-        # Extract metrics from analysis results
+        # Calculate metrics from predictions
+        preds = np.array(analysis_results['predictions']['preds'])
+        labels = np.array(analysis_results['predictions']['labels'])
+        
+        # Filter out error labels
+        valid_mask = labels != -1
+        valid_preds = preds[valid_mask]
+        valid_labels = labels[valid_mask]
+        
         refusal_metrics = {
-            'accuracy': analysis_results['predictions']['accuracy'],
-            'macro_f1': analysis_results['predictions']['macro_f1'],
-            'weighted_f1': analysis_results['predictions']['weighted_f1'],
-            'macro_precision': analysis_results['predictions']['macro_precision'],
-            'macro_recall': analysis_results['predictions']['macro_recall']
+            'accuracy': float(accuracy_score(valid_labels, valid_preds)),
+            'macro_f1': float(f1_score(valid_labels, valid_preds, average='macro', zero_division=0)),
+            'weighted_f1': float(f1_score(valid_labels, valid_preds, average='weighted', zero_division=0)),
+            'macro_precision': float(precision_score(valid_labels, valid_preds, average='macro', zero_division=0)),
+            'macro_recall': float(recall_score(valid_labels, valid_preds, average='macro', zero_division=0))
         }
 
+        # Extract metrics from analysis results
+# =============================================================================
+#         refusal_metrics = {
+#             'accuracy': analysis_results['predictions']['accuracy'],
+#             'macro_f1': analysis_results['predictions']['macro_f1'],
+#             'weighted_f1': analysis_results['predictions']['weighted_f1'],
+#             'macro_precision': analysis_results['predictions']['macro_precision'],
+#             'macro_recall': analysis_results['predictions']['macro_recall']
+#         }
+# =============================================================================
+
+        # Generate refusal classifier performance report
+# =============================================================================
+#         refusal_report_path = os.path.join(reports_path, f"refusal_performance_report_{timestamp}.pdf")
+#         refusal_report_gen.generate_model_performance_report(
+#             model_name="Refusal Classifier",
+#             metrics=refusal_metrics,
+#             confusion_matrix_fig=figures['confusion_matrix'],
+#             training_curves_fig=figures['refusal_training_curves'],
+#             class_distribution_fig=figures['class_distribution'],
+#             output_path=refusal_report_path,
+#             run_timestamp=timestamp  # NEW: Pass run timestamp to report
+#         )
+# =============================================================================
+
+
+        # Build comprehensive metrics from analysis_results (no import needed - it's already loaded)
+        # refusal_metrics = build_refusal_metrics_from_results(analysis_results)        
+        
+        refusal_data = analysis_results.copy()
+
+        if 'correlation' in analysis_results:
+            refusal_data['correlation'] = analysis_results['correlation']
+        
+        if 'adversarial' in analysis_results:
+            refusal_data['adversarial'] = analysis_results['adversarial']
+        
+        refusal_metrics = build_refusal_metrics_from_results(refusal_data)
+
+        
+        # FIX: Read actual split sizes from metadata (saved by ExperimentRunner)
+        metadata = analysis_results.get('metadata', {})
+        
+        train_size = metadata.get('num_train_samples', 'N/A')
+        val_size = metadata.get('num_val_samples', 'N/A')
+        
+        # Fallback estimation if metadata unavailable
+        if train_size == 'N/A' or val_size == 'N/A':
+            test_size = len(analysis_results['predictions']['labels'])
+            train_split = DATASET_CONFIG['train_split']
+            val_split = DATASET_CONFIG['val_split']
+            train_size = int(test_size * (train_split / DATASET_CONFIG['test_split']))
+            val_size = int(test_size * (val_split / DATASET_CONFIG['test_split']))
+        
+        refusal_metrics['train_samples'] = train_size
+        refusal_metrics['val_samples'] = val_size
+        
+        test_samples_count = len(analysis_results.get('predictions', {}).get('labels', []))
+        refusal_metrics['test_samples'] = test_samples_count
+        
         # Generate refusal classifier performance report
         refusal_report_path = os.path.join(reports_path, f"refusal_performance_report_{timestamp}.pdf")
         refusal_report_gen.generate_model_performance_report(
@@ -1496,7 +2899,8 @@ class RefusalPipeline:
             confusion_matrix_fig=figures['confusion_matrix'],
             training_curves_fig=figures['refusal_training_curves'],
             class_distribution_fig=figures['class_distribution'],
-            output_path=refusal_report_path
+            output_path=refusal_report_path,
+            run_timestamp=timestamp
         )
 
         print(f"   ✓ Saved: {os.path.basename(refusal_report_path)}")
@@ -1513,13 +2917,134 @@ class RefusalPipeline:
 
         print("\n--- Generating Jailbreak Detector Report ---")
 
-        # For jailbreak detector, we'd need separate metrics and confusion matrix
-        # For now, just note that it would be generated
-        print(f"   ℹ️  Jailbreak report requires separate evaluation metrics")
-        print(f"      (Not yet implemented in current pipeline)")
+        # Extract jailbreak analysis results
+        print("\n--- Generating Jailbreak Detector Report ---")
+        
+        # Extract jailbreak analysis results
+        if 'jailbreak' in analysis_results and analysis_results['jailbreak']:
+            jailbreak_data = analysis_results['jailbreak'].copy()  # Make a copy to avoid modifying original
+            
+            # CRITICAL FIX: Add correlation and adversarial data from root level
+            # These are stored at analysis_results level, not inside jailbreak dict
+            if 'correlation' in analysis_results:
+                jailbreak_data['correlation'] = analysis_results['correlation']
+            
+            if 'adversarial' in analysis_results:
+                jailbreak_data['adversarial'] = analysis_results['adversarial']
+            
+            if 'metadata' in analysis_results:
+                jailbreak_data['metadata'] = analysis_results['metadata']
+
+            # Build comprehensive metrics using existing builder function (SAME AS REFUSAL!)
+            jailbreak_metrics = build_jailbreak_metrics_from_results(jailbreak_data)
+            
+            
+            # FIX: Read actual split sizes from metadata (saved by ExperimentRunner)
+            metadata = analysis_results.get('metadata', {})
+            
+            train_size = metadata.get('num_train_samples', 'N/A')
+            val_size = metadata.get('num_val_samples', 'N/A')
+            
+            if train_size == 'N/A' or val_size == 'N/A':
+                test_size = len(analysis_results['predictions']['labels'])
+                train_split = DATASET_CONFIG['train_split']
+                val_split = DATASET_CONFIG['val_split']
+                train_size = int(test_size * (train_split / DATASET_CONFIG['test_split']))
+                val_size = int(test_size * (val_split / DATASET_CONFIG['test_split']))
+            
+            jailbreak_metrics['train_samples'] = train_size
+            jailbreak_metrics['val_samples'] = val_size
+            
+            
+            test_samples_count = len(jailbreak_data.get('predictions', {}).get('labels', []))
+            jailbreak_metrics['test_samples'] = test_samples_count
+            
+            # Calculate total WildJailbreak from saved labeled_df
+            try:
+                labeled_files = glob.glob(os.path.join(data_processed_path, "labeled_responses_*.pkl"))
+                if labeled_files:
+                    labeled_df = pd.read_pickle(sorted(labeled_files)[-1])
+                    total_wj = len(labeled_df[labeled_df['data_source'] == 'wildjailbreak'])
+                    jailbreak_metrics['total_wildjailbreak_samples'] = total_wj
+            except Exception:
+                pass
+            
+            
+            # Get predictions for visualizations
+            if 'predictions' in jailbreak_data:
+                jb_preds = jailbreak_data['predictions'].get('preds', [])
+                jb_labels = jailbreak_data['predictions'].get('labels', [])
+                
+                if len(jb_preds) > 0 and len(jb_labels) > 0:
+                    # Convert to numpy arrays
+                    jb_preds = np.array(jb_preds)
+                    jb_labels = np.array(jb_labels)
+                    
+                    # 1. CREATE CONFUSION MATRIX FIGURE (not in figures dict!)
+                    jb_cm = confusion_matrix(jb_labels, jb_preds, labels=[0, 1])
+                    jailbreak_cm_fig = plt.figure(figsize=(8, 6))
+                    ax_cm = jailbreak_cm_fig.add_subplot(111)
+                    
+                    sns.heatmap(jb_cm, annot=True, fmt='d', cmap='Blues', 
+                               xticklabels=JAILBREAK_CLASS_NAMES,
+                               yticklabels=JAILBREAK_CLASS_NAMES,
+                               ax=ax_cm, cbar_kws={'label': 'Count'})
+                    ax_cm.set_xlabel('Predicted Label', fontsize=12)
+                    ax_cm.set_ylabel('True Label', fontsize=12)
+                    ax_cm.set_title('Confusion Matrix', fontsize=14, fontweight='bold')
+                    plt.tight_layout()
+                    
+                    # 2. CREATE CLASS DISTRIBUTION FIGURE
+                    jailbreak_class_dist_fig = plt.figure(figsize=(8, 6))
+                    ax_dist = jailbreak_class_dist_fig.add_subplot(111)
+                    
+                    class_counts = [np.sum(jb_labels == 0), np.sum(jb_labels == 1)]
+                    bars = ax_dist.bar(JAILBREAK_CLASS_NAMES, class_counts, color=JAILBREAK_PLOT_COLORS_LIST)
+                    ax_dist.set_ylabel('Number of Samples', fontsize=12)
+                    ax_dist.set_title('Jailbreak Class Distribution', fontsize=14, fontweight='bold')
+                    ax_dist.grid(axis='y', alpha=0.3)
+                    
+                    # Add count labels on bars
+                    for bar, count in zip(bars, class_counts):
+                        height = bar.get_height()
+                        ax_dist.text(bar.get_x() + bar.get_width()/2., height,
+                                    str(count), ha='center', va='bottom', fontsize=11)
+                    
+                    plt.tight_layout()
+                    
+                    # 3. GET TRAINING CURVES (already in figures dict from generate_visualizations)
+                    jailbreak_training_fig = figures.get('jailbreak_training_curves', None)
+                    
+                    # Generate comprehensive jailbreak performance report (MIRRORS REFUSAL REPORT!)
+                    jailbreak_report_path = os.path.join(reports_path, f"jailbreak_performance_report_{timestamp}.pdf")
+                    jailbreak_report_gen.generate_model_performance_report(
+                        model_name="Jailbreak Detector",
+                        metrics=jailbreak_metrics,
+                        confusion_matrix_fig=jailbreak_cm_fig,
+                        training_curves_fig=jailbreak_training_fig,
+                        class_distribution_fig=jailbreak_class_dist_fig,
+                        output_path=jailbreak_report_path,
+                        run_timestamp=timestamp
+                    )
+                    
+                    print(f"   ✓ Generated: {jailbreak_report_path}")
+                    print(f"      Accuracy: {jailbreak_metrics['accuracy']*100:.1f}%, F1: {jailbreak_metrics['macro_f1']:.3f}")
+                    
+                    # Close created figures
+                    plt.close(jailbreak_cm_fig)
+                    plt.close(jailbreak_class_dist_fig)
+                else:
+                    print("   ⚠️  No jailbreak predictions available for report")
+            else:
+                print("   ⚠️  No jailbreak predictions in analysis results")
+        else:
+            print("   ⚠️  No jailbreak analysis results available")
 
         # Close jailbreak figure
-        plt.close(figures['jailbreak_training_curves'])
+        if 'jailbreak_training_curves' in figures:
+            plt.close(figures['jailbreak_training_curves'])
+        if 'jailbreak_confusion_matrix' in figures:
+            plt.close(figures['jailbreak_confusion_matrix'])
 
         # ═══════════════════════════════════════════════════════
         # COMBINED EXECUTIVE SUMMARY
