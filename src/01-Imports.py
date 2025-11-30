@@ -25,6 +25,7 @@ import asyncio
 import threading
 import argparse
 import traceback
+import gc
 #from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Tuple, Optional, Any, Union
@@ -50,21 +51,24 @@ from sklearn.metrics import (
     precision_recall_curve,
     average_precision_score,
     cohen_kappa_score,
-    ConfusionMatrixDisplay
+    ConfusionMatrixDisplay,
+    matthews_corrcoef
 )
 
+
 # Statistical Testing
-from scipy.stats import chisquare, chi2_contingency, shapiro, kstest, chi2
+from scipy.stats import chisquare, chi2_contingency, shapiro, kstest, chi2, binomtest
 from scipy import stats as scipy_stats
 
 # Deep Learning
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
 from torch.optim import AdamW
 
 # Transformers
+import transformers
 from transformers import (
     RobertaModel,
     RobertaTokenizer,
@@ -79,6 +83,8 @@ from transformers import (
 # WildJailBreak dataset
 import datasets
 from datasets import load_dataset
+
+from datasketch import MinHash, MinHashLSH
 
 # Visualization
 import matplotlib.pyplot as plt
@@ -182,6 +188,9 @@ shap_analysis_path = os.path.join(visualizations_path, "SHAP Analysis")
 correlation_viz_path = os.path.join(visualizations_path, "Correlation Analysis")
 error_analysis_path = os.path.join(visualizations_path, "Error Analysis")
 power_law_viz_path = os.path.join(visualizations_path, "Power Law Analysis")
+reporting_viz_path = os.path.join(visualizations_path, "For Reporting")
+
+reporting_viz_path = os.path.join(visualizations_path, "For Reporting")
 
 # Reports Directory
 reports_path = glob.glob(base_results_path + "/*Reports/")[0]
@@ -191,7 +200,8 @@ api_keys_file_path = glob.glob(project_path + "/*API Keys/API Keys.txt")[0]
 
 # Create subdirectories if they don't exist
 for path in [analysis_results_path, quality_review_path, attention_analysis_path, 
-             shap_analysis_path, correlation_viz_path, error_analysis_path, power_law_viz_path]:
+             shap_analysis_path, correlation_viz_path, error_analysis_path, power_law_viz_path
+             ,reporting_viz_path]:
     os.makedirs(path, exist_ok=True)
 
 
@@ -204,7 +214,7 @@ CodeFilePath = glob.glob(project_path + "/*Code/*Python/")[0]
 code_files_ls = os.listdir(CodeFilePath)
 code_files_ls.sort()
 code_files_ls = [x for x in code_files_ls if "py" in x]
-code_files_ls = code_files_ls[1:33]
+code_files_ls = code_files_ls[1:32]
 
 # Loop over cde files
 #--------------------
