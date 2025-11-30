@@ -377,6 +377,7 @@ class WildJailbreakLoader:
             standardized['is_jailbreak_attempt'] = 1  # These are all jailbreak attempts
 
             # Jailbreak label (all succeeded in WildJailbreak)
+            # All WildJailbreak samples are successful jailbreaks
             standardized['jailbreak_label'] = 1  # Changed from jailbreak_success to match pipeline expectation
             
             # Confidence scores from config - NO HARDCODING!
