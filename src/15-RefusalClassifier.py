@@ -93,6 +93,7 @@ class RefusalClassifier(nn.Module):
         print(f"  Total parameters: {self.total_params:,}")
         print(f"  Trainable parameters: {self.trainable_params:,}")
         print(f"  Class weights: {self.use_class_weights}")
+        print(f"  Learning rate: {TRAINING_CONFIG['learning_rate']}")
         print("=" * 60)
     
     def forward(self, 
