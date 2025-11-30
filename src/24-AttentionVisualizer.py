@@ -8,7 +8,7 @@
 class AttentionVisualizer:
     """Visualize attention weights from RoBERTa model."""
 
-    def __init__(self, model, tokenizer, device, class_names: List[str] = None):
+    def __init__(self, model, tokenizer, device, class_names: List[str] = None, task_type: str = 'refusal'):
         """
         Initialize attention visualizer.
 
@@ -19,6 +19,7 @@ class AttentionVisualizer:
             tokenizer: RoBERTa tokenizer
             device: torch device
             class_names: List of class names (default: uses CLASS_NAMES from config)
+            task_type: 'refusal' or 'jailbreak' for proper label column detection
         """
         self.model = model
         self.tokenizer = tokenizer
@@ -26,6 +27,7 @@ class AttentionVisualizer:
         self.class_names = class_names or CLASS_NAMES
         self.num_classes = len(self.class_names)
         self.dpi = VISUALIZATION_CONFIG['dpi']
+        self.task_type = task_type
         self.model.eval()
 
     def get_attention_weights(self, text: str):
@@ -159,8 +161,8 @@ class AttentionVisualizer:
 
         print(f"✓ Saved attention visualization to {output_path}")
 
-    def analyze_samples(self, test_df: pd.DataFrame, num_samples: int = None,
-                       output_dir: str = None):
+    def analyze_samples(self, test_df: pd.DataFrame, num_samples: int = None, output_dir: str = None, timestamp: str = None, classifier_name: str = None):
+
         """
         Analyze attention patterns for multiple samples.
 
@@ -184,6 +186,12 @@ class AttentionVisualizer:
 
         print_banner("ATTENTION ANALYSIS", width=60, char="=")
 
+        # Smart label column detection (same logic as ConfidenceAnalyzer)
+        if self.task_type == 'refusal':
+            label_col = 'refusal_label' if 'refusal_label' in test_df.columns else 'label'
+        else:
+            label_col = 'jailbreak_label' if 'jailbreak_label' in test_df.columns else 'label'
+
         results = {'by_class': {}, 'examples': []}
 
         for class_idx in range(self.num_classes):
@@ -191,7 +199,7 @@ class AttentionVisualizer:
             print(f"\nAnalyzing {class_name} samples...")
 
             # Get samples from this class
-            class_samples = test_df[test_df['label'] == class_idx]
+            class_samples = test_df[test_df[label_col] == class_idx]
 
             if len(class_samples) == 0:
                 continue
@@ -217,12 +225,13 @@ class AttentionVisualizer:
 
                 # Get attention
                 attention_data = self.get_attention_weights(text)
-
+                
+                
                 # Save visualization for first 3 samples
                 if i < 3:
                     output_path = os.path.join(
                         output_dir,
-                        f"attention_{class_name.replace(' ', '_').lower()}_sample_{i+1}.png"
+                        f"attention_{class_name.replace(' ', '_').lower()}_sample_{i+1}_{timestamp}.png" if timestamp else f"attention_{class_name.replace(' ', '_').lower()}_sample_{i+1}.png"
                     )
                     self.visualize_attention(text, output_path)
 
@@ -262,7 +271,7 @@ class AttentionVisualizer:
                 }
 
         # Save results
-        results_json_path = os.path.join(output_dir, "attention_analysis_results.json")
+        results_json_path = os.path.join(output_dir, f"{classifier_name}_attention_analysis_results_{timestamp}.json")
 
         serializable_results = convert_to_serializable(results)
 
