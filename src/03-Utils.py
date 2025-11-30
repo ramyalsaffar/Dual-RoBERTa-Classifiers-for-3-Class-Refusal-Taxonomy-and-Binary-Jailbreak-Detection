@@ -67,8 +67,8 @@ def safe_load_checkpoint(checkpoint_path: str, device: torch.device) -> dict:
     """
     # Load to device specified in config (no hardcoding!)
     load_device = TRAINING_CONFIG.get('checkpoint_load_device', 'cpu')
-    checkpoint = torch.load(checkpoint_path, map_location=load_device)
-    
+    checkpoint = torch.load(checkpoint_path, map_location=load_device, weights_only=False)
+
     return checkpoint
 
 
@@ -179,7 +179,7 @@ class DynamicRateLimiter:
             self.consecutive_hits = 0
             
             # Check if we can increase capacity (after stable period)
-            minutes_since_adjustment = (datetime.now() - self.last_adjustment).seconds / 60
+            minutes_since_adjustment = (datetime.now() - self.last_adjustment).total_seconds() / 60
             
             if minutes_since_adjustment > self.stable_duration_minutes:
                 success_rate = 1 - (self.rate_limit_hits / max(self.total_requests, 1))
@@ -438,9 +438,9 @@ def get_model_display_name(model_key: str) -> str:
     """
     display_names = {
         'claude': 'Claude Sonnet 4.5',
-        'gpt5': 'GPT-5', 
-        'gemini': 'Gemini 2.5 Flash',
-        'WildJailbreak': 'WildJailbreak (Synthetic)'
+        'gpt5': 'GPT-5.1', 
+        'gemini': 'Gemini 3 Pro',
+        'wildjailbreak': 'WildJailbreak (Synthetic)'
     }
     return display_names.get(model_key, model_key.title())
 
@@ -501,7 +501,7 @@ def convert_to_serializable(obj):
     Recursively convert numpy/pandas types to native Python types for JSON serialization.
 
     Args:
-        obj: Object to convert (dict, list, numpy type, etc.)
+        obj: Object to convert (dict, list, numpy type, pandas DataFrame, etc.)
 
     Returns:
         Object with all numpy/pandas types converted to native Python types
@@ -514,6 +514,10 @@ def convert_to_serializable(obj):
         return {k: convert_to_serializable(v) for k, v in obj.items()}
     elif isinstance(obj, (list, tuple)):
         return [convert_to_serializable(item) for item in obj]
+    elif isinstance(obj, pd.DataFrame):
+        return obj.to_dict(orient='records')  # Convert DataFrame to list of dicts
+    elif isinstance(obj, pd.Series):
+        return obj.to_list()  # Convert Series to list
     elif isinstance(obj, (np.integer, np.int64, np.int32)):
         return int(obj)
     elif isinstance(obj, (np.floating, np.float64, np.float32)):
@@ -522,7 +526,167 @@ def convert_to_serializable(obj):
         return bool(obj)
     elif isinstance(obj, np.ndarray):
         return obj.tolist()
+    elif pd.isna(obj):  # Handle pandas NA/NaN
+        return None
     return obj
+
+
+def get_interpretability_config(total_prompts: int = None, test_split: float = None) -> dict:
+    """
+    Dynamically calculate optimal interpretability settings based on dataset size.
+    
+    Automatically selects appropriate settings tier to balance:
+    - Statistical rigor (larger samples for publication-ready work)
+    - Computational efficiency (smaller samples for quick testing)
+    - Industry standards (meets academic requirements automatically)
+    
+    Tier Selection:
+        - MINIMAL: Very small datasets (<30 test samples) - exploratory only
+        - EXPLORATORY: Small datasets (30-100 test samples) - quick testing
+        - BALANCED: Medium datasets (100-200 test samples) - serious work
+        - PUBLICATION: Large datasets (200+ test samples) - publication-ready
+    
+    Args:
+        total_prompts: Total prompts in experiment (defaults to 2000)
+        test_split: Test set fraction (defaults to 0.15)
+    
+    Returns:
+        Dictionary with optimal interpretability settings
+    
+    Examples:
+        >>> # Test mode: 50 prompts → 7 test samples → MINIMAL tier
+        >>> config = get_interpretability_config(50)
+        >>> config['shap_samples']
+        10
+        
+        >>> # Full mode: 2000 prompts → 300 test samples → PUBLICATION tier
+        >>> config = get_interpretability_config(2000)
+        >>> config['shap_samples']
+        50
+    
+    Academic References:
+        - Ribeiro et al. 2016 (LIME): 20-50 examples
+        - Lundberg et al. 2020 (SHAP): 100 examples for robust analysis
+        - Jain & Wallace 2019 (Attention): 50-100 examples
+    """
+    # Use sensible defaults if not provided
+    # Config file will pass actual values from DATASET_CONFIG when calling
+    if total_prompts is None:
+        total_prompts = 2000  # Standard full experiment size
+    if test_split is None:
+        test_split = 0.15  # Standard test split
+    
+    # Calculate expected test set size
+    test_set_size = int(total_prompts * test_split)
+    
+    # Define scaling rules based on dataset size
+    # Thresholds derived from academic standards (Ribeiro 2016, Lundberg 2020)
+    if test_set_size < 30:
+        # MINIMAL: Very small test sets - exploratory only
+        config_tier = 'minimal'
+        shap_samples = max(10, min(15, test_set_size - 5))
+        attention_per_class = 3
+        shap_background = 30
+        shap_visualize_per_class = 1
+        
+    elif test_set_size < 100:
+        # EXPLORATORY: Small test sets - quick testing, not publication
+        config_tier = 'exploratory'
+        shap_samples = max(15, min(20, test_set_size - 10))
+        attention_per_class = 5
+        shap_background = 50
+        shap_visualize_per_class = 2
+        
+    elif test_set_size < 200:
+        # BALANCED: Medium test sets - serious work, approaching publication quality
+        config_tier = 'balanced'
+        shap_samples = 30
+        attention_per_class = 10
+        shap_background = 75
+        shap_visualize_per_class = 3
+        
+    else:
+        # PUBLICATION: Large test sets - publication-ready, meets academic standards
+        config_tier = 'publication'
+        shap_samples = 50
+        attention_per_class = 20
+        shap_background = 100
+        shap_visualize_per_class = 3
+    
+    # Safety: Ensure we don't request more samples than available
+    max_safe_samples = max(10, test_set_size - 10)  # Reserve buffer
+    shap_samples = min(shap_samples, max_safe_samples)
+    
+    return {
+        # Metadata (for debugging/logging)
+        '_config_tier': config_tier,
+        '_test_set_size': test_set_size,
+        '_total_prompts': total_prompts,
+        
+        # Attention Visualization
+        'attention_samples_per_class': attention_per_class,
+        'attention_layer_index': -1,
+        'attention_top_k_tokens': 15,
+        'visualize_all_layers': False,
+        
+        # SHAP Analysis
+        'shap_enabled': True,
+        'shap_samples': shap_samples,
+        'shap_samples_per_class': shap_visualize_per_class,
+        'shap_background_samples': shap_background,
+        'shap_max_display': 20,
+        
+        # Statistical Agreement Thresholds (Cohen's Kappa, etc.)
+        'kappa_thresholds': {
+            'almost_perfect': 0.80,
+            'substantial': 0.60,
+            'moderate': 0.40,
+            'fair': 0.20,
+            'slight': 0.0
+        },
+        
+        # Power Law Analysis Thresholds
+        'power_law_exponent_range': (1.0, 3.0),
+        'zipf_exponent_range': (0.8, 1.5),
+        
+        # Calibration Thresholds (Expected Calibration Error)
+        'ece_thresholds': {
+            'excellent': 0.05,
+            'good': 0.10,
+            'acceptable': 0.15
+        },
+        
+        # General Interpretability
+        'min_confidence_threshold': 0.5
+    }
+
+
+def get_timestamped_filename(base_name: str, prefix: str = None, timestamp: str = None) -> str:
+    """
+    Generate standardized filename with optional prefix and timestamp.
+    
+    Args:
+        base_name: Base filename (e.g., "confusion_matrix.png")
+        prefix: Optional prefix (e.g., "refusal", "jailbreak", "correlation")
+        timestamp: Optional timestamp (e.g., "20251116_2348")
+    
+    Returns:
+        Formatted filename (e.g., "refusal_confusion_matrix_20251116_2348.png")
+    
+    Examples:
+        >>> get_timestamped_filename("heatmap.png", "correlation", "20251116_2348")
+        'correlation_heatmap_20251116_2348.png'
+    """
+    name, ext = os.path.splitext(base_name)
+    
+    parts = []
+    if prefix:
+        parts.append(prefix)
+    parts.append(name)
+    if timestamp:
+        parts.append(timestamp)
+    
+    return "_".join(parts) + ext
 
 
 #------------------------------------------------------------------------------
