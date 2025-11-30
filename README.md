@@ -233,7 +233,6 @@ Freezing the bottom 6 of 12 RoBERTa encoder layers:
 Responses collected from three frontier models:
 - **Claude Sonnet 4.5** (Anthropic)
 - **GPT-5** (OpenAI)
-- **Gemini 2.5 Flash** (Google)
 
 ### Data Splits
 
