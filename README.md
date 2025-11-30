@@ -59,7 +59,7 @@ Stage 1: Generate          Stage 2: Self-Evaluate       Stage 3: Regenerate
 
 Every prompt MUST include realistic imperfections. GPT-4 generates prompts following these strict requirements:
 
-| Characteristic | Probability | Examples |
+| Characteristic | Percentage | Examples |
 |----------------|-------------|----------|
 | Casual greetings | 30% | "hey", "yo", "hi there", "sup" |
 | Typos/grammar errors | 20% | "teh", "recieve", "your" vs "you're" |
