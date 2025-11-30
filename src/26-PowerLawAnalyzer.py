@@ -40,9 +40,15 @@ class PowerLawAnalyzer:
         self.class_names = class_names or CLASS_NAMES
         self.num_classes = len(self.class_names)
         self.model_type = model_type
+        
+        # Create filename prefix from model_type
+        # "Refusal Classifier" → "refusal"
+        # "Jailbreak Detector" → "jailbreak"
+        self.file_prefix = model_type.lower().split()[0] if model_type else "model"
+    
 
     def analyze_all(self, test_df: pd.DataFrame, predictions: np.ndarray,
-                    confidences: np.ndarray, output_dir: str = None) -> Dict:
+                    confidences: np.ndarray, output_dir: str = None, timestamp: str = None) -> Dict:
         """
         Run all power law analyses.
 
@@ -51,6 +57,7 @@ class PowerLawAnalyzer:
             predictions: Model predictions
             confidences: Prediction confidences
             output_dir: Directory to save visualizations (default: visualizations_path)
+            timestamp: Timestamp string for filename (e.g., '20250114_1430')
 
         Returns:
             Dictionary with all power law analysis results
@@ -60,8 +67,15 @@ class PowerLawAnalyzer:
             print("❌ ERROR: test_df is empty. Cannot perform power law analysis.")
             return {'error': 'Empty test dataframe'}
         
+        # Smart label column detection (same logic as ConfidenceAnalyzer)
+        # Determine which label column to use based on model_type
+        if 'jailbreak' in self.model_type.lower():
+            label_col = 'jailbreak_label' if 'jailbreak_label' in test_df.columns else 'label'
+        else:
+            label_col = 'refusal_label' if 'refusal_label' in test_df.columns else 'label'
+        
         # Check required columns
-        required_cols = ['label', 'response']
+        required_cols = [label_col, 'response']
         missing_cols = [col for col in required_cols if col not in test_df.columns]
         if missing_cols:
             print(f"❌ ERROR: Missing required columns: {missing_cols}")
@@ -77,7 +91,7 @@ class PowerLawAnalyzer:
             return {'error': 'Mismatched array lengths'}
         
         # Check for perfect predictions (no errors)
-        labels = test_df['label'].values
+        labels = test_df[label_col].values
         predictions_arr = np.asarray(predictions, dtype=np.int32)
         errors = predictions_arr != labels
         error_count = errors.sum()
@@ -100,7 +114,7 @@ class PowerLawAnalyzer:
         print("\n--- Error Concentration Analysis (Pareto Principle) ---")
         if error_count > 0:
             results['error_concentration'] = self._analyze_error_concentration(
-                test_df, predictions, output_dir
+                test_df, predictions, output_dir, label_col, timestamp
             )
             self._print_pareto_results(results['error_concentration'])
         else:
@@ -110,14 +124,14 @@ class PowerLawAnalyzer:
         # 2. Confidence Distribution Analysis
         print("\n--- Confidence Distribution (Power Law Check) ---")
         results['confidence_distribution'] = self._analyze_confidence_distribution(
-            confidences, predictions, test_df['label'].values, output_dir
+            confidences, predictions, test_df[label_col].values, output_dir, timestamp
         )
         self._print_confidence_analysis(results['confidence_distribution'])
 
         # 3. Attention Power Law Analysis
         print("\n--- Attention Distribution (Token Importance) ---")
         results['attention_power_law'] = self._analyze_attention_power_law(
-            test_df, output_dir
+            test_df, output_dir, timestamp
         )
         self._print_attention_analysis(results['attention_power_law'])
 
@@ -127,18 +141,26 @@ class PowerLawAnalyzer:
 
     def _analyze_error_concentration(self, test_df: pd.DataFrame,
                                     predictions: np.ndarray,
-                                    output_dir: str) -> Dict:
+                                    output_dir: str,
+                                    label_col: str,
+                                    timestamp: str = None) -> Dict:
         """
         Analyze error concentration (Pareto Principle).
 
         Question: Do 20% of categories/models cause 80% of errors?
+
+        Args:
+            test_df: Test dataframe
+            predictions: Model predictions
+            output_dir: Output directory for plots
+            label_col: Name of label column to use
 
         Returns:
             Dictionary with Pareto analysis results
         """
         # Ensure predictions is a numpy array
         predictions = np.asarray(predictions, dtype=np.int32)
-        labels = test_df['label'].values
+        labels = test_df[label_col].values
         errors = predictions != labels
 
         results = {
@@ -156,14 +178,14 @@ class PowerLawAnalyzer:
         # Create Pareto visualizations
         self._plot_pareto_chart(
             results['by_category'],
-            os.path.join(output_dir, "pareto_errors_by_category.png"),
+            os.path.join(output_dir, get_timestamped_filename("pareto_errors_by_category.png", self.file_prefix, timestamp)),
             "Error Concentration by Category (Pareto Analysis)"
         )
 
         if results['by_model'] is not None:
             self._plot_pareto_chart(
                 results['by_model'],
-                os.path.join(output_dir, "pareto_errors_by_model.png"),
+                os.path.join(output_dir, get_timestamped_filename("pareto_errors_by_model.png", self.file_prefix, timestamp)),
                 "Error Concentration by Model (Pareto Analysis)"
             )
 
@@ -264,7 +286,8 @@ class PowerLawAnalyzer:
     def _analyze_confidence_distribution(self, confidences: np.ndarray,
                                         predictions: np.ndarray,
                                         labels: np.ndarray,
-                                        output_dir: str) -> Dict:
+                                        output_dir: str,
+                                        timestamp: str = None) -> Dict:
         """
         Analyze confidence score distribution for power law.
 
@@ -345,13 +368,13 @@ class PowerLawAnalyzer:
         # Plot confidence distribution
         self._plot_confidence_distribution(
             confidences, correct_confidences, error_confidences,
-            os.path.join(output_dir, "confidence_distribution.png")
+            os.path.join(output_dir, get_timestamped_filename("confidence_distribution.png", self.file_prefix, timestamp))
         )
 
         # Plot calibration curve
         self._plot_calibration_curve(
             calibration,
-            os.path.join(output_dir, "confidence_calibration.png")
+            os.path.join(output_dir, get_timestamped_filename("confidence_calibration.png", self.file_prefix, timestamp))
         )
 
         return {
@@ -371,7 +394,8 @@ class PowerLawAnalyzer:
         }
 
     def _analyze_attention_power_law(self, test_df: pd.DataFrame,
-                                    output_dir: str) -> Dict:
+                                    output_dir: str,
+                                    timestamp: str = None) -> Dict:
         """
         Analyze attention weight distribution for power law.
 
@@ -465,7 +489,7 @@ class PowerLawAnalyzer:
         # Plot attention distribution
         self._plot_attention_distribution(
             sorted_attentions, ranks,
-            os.path.join(output_dir, "attention_power_law.png")
+            os.path.join(output_dir, get_timestamped_filename("attention_power_law.png", self.file_prefix, timestamp))
         )
 
         return {
