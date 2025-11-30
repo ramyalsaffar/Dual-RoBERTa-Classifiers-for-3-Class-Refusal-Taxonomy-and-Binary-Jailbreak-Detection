@@ -637,6 +637,40 @@ class CheckpointManager:
         return deleted
 
 
+    @staticmethod
+    def save_pipeline_checkpoint(step_number: int, experiment_name: str, timestamp: str):
+        """Save pipeline checkpoint after step completes."""
+        checkpoint_data = {
+            'step_completed': step_number,
+            'experiment_name': experiment_name,
+            'timestamp': timestamp,
+            'saved_at': datetime.now().isoformat()
+        }
+        
+        checkpoint_path = os.path.join(data_checkpoints_path, f"pipeline_checkpoint_{timestamp}.json")
+        ensure_dir_exists(data_checkpoints_path)
+        
+        with open(checkpoint_path, 'w') as f:
+            json.dump(checkpoint_data, f, indent=2)
+        
+        print(f"✓ Pipeline checkpoint saved: Step {step_number} complete")
+
+
+    @staticmethod
+    def load_pipeline_checkpoint():
+        """Load most recent pipeline checkpoint."""
+        checkpoint_pattern = os.path.join(data_checkpoints_path, "pipeline_checkpoint_*.json")
+        checkpoint_files = glob.glob(checkpoint_pattern)
+        
+        if not checkpoint_files:
+            return None
+        
+        latest_checkpoint = max(checkpoint_files, key=os.path.getmtime)
+        
+        with open(latest_checkpoint, 'r') as f:
+            return json.load(f)
+    
+
 #------------------------------------------------------------------------------
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
