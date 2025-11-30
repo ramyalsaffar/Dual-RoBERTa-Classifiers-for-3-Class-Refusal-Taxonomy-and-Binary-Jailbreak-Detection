@@ -426,7 +426,7 @@ class DatasetValidator:
         """
         if output_path is None:
             output_path = os.path.join(
-                results_path,
+                analysis_results_path,
                 f"{EXPERIMENT_CONFIG['experiment_name']}_hypothesis_tests.txt"
             )
 
@@ -503,7 +503,7 @@ class DatasetValidator:
         """
         if output_path is None:
             output_path = os.path.join(
-                results_path,
+                analysis_results_path,
                 f"{EXPERIMENT_CONFIG['experiment_name']}_hypothesis_results.pkl"
             )
 
