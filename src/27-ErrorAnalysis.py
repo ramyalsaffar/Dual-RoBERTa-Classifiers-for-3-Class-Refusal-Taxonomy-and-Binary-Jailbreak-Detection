@@ -30,7 +30,9 @@ class ErrorAnalyzer:
                  tokenizer,
                  device: torch.device,
                  class_names: List[str],
-                 task_type: str = 'refusal'):
+                 task_type: str = 'refusal',
+                 output_dir: str = None,
+                 timestamp: str = None):
         """
         Initialize error analyzer.
 
@@ -41,6 +43,7 @@ class ErrorAnalyzer:
             device: torch device
             class_names: List of class names
             task_type: 'refusal' or 'jailbreak'
+            output_dir: Directory to save visualizations (default: error_analysis_path)
         """
         # Input Validation
         if model is None:
@@ -61,6 +64,10 @@ class ErrorAnalyzer:
         self.device = device
         self.class_names = class_names
         self.task_type = task_type
+        
+        # Set output directory - use error_analysis_path if not provided
+        self.output_dir = output_dir if output_dir is not None else error_analysis_path
+        self.timestamp = timestamp
 
         # Model predictions and metadata
         self.predictions = None
@@ -78,6 +85,7 @@ class ErrorAnalyzer:
         print(f"Dataset size: {len(dataset)}")
         print(f"Classes: {class_names}")
         print(f"Device: {device}")
+        print(f"Output directory: {self.output_dir}")
         print_banner("", width=60, char="=")
 
 
@@ -156,8 +164,14 @@ class ErrorAnalyzer:
         print_banner("MODULE 1: CONFUSION MATRIX DEEP DIVE", width=60)
 
 
-        # Calculate confusion matrix
-        cm = confusion_matrix(self.true_labels, self.predictions)
+        # Calculate confusion matrix with EXPLICIT labels to ensure correct size
+        # CRITICAL: Must specify labels parameter to match self.class_names
+        # Otherwise sklearn infers from unique values which may not match num_classes
+        cm = confusion_matrix(
+            self.true_labels, 
+            self.predictions,
+            labels=list(range(len(self.class_names)))  # FIXED: Explicit labels [0, 1, ...N-1]
+        )
 
         # Normalize confusion matrix (row-wise) using safe_divide
         # Handle division by zero - rows with no samples get 0
@@ -225,7 +239,9 @@ class ErrorAnalyzer:
             axes[1].set_title('Confusion Matrix (Normalized)', fontsize=14, fontweight='bold')
 
             plt.tight_layout()
-            save_path = os.path.join(visualizations_path, f"{self.task_type}_error_confusion_matrix.png")
+            
+            save_path = os.path.join(self.output_dir, get_timestamped_filename("error_confusion_matrix.png", self.task_type, self.timestamp))
+            
             plt.savefig(save_path, dpi=VISUALIZATION_CONFIG['dpi'], bbox_inches='tight')
             plt.close()
             print(f"✓ Confusion matrix visualization saved: {save_path}\n")
@@ -318,7 +334,9 @@ class ErrorAnalyzer:
             axes[2].grid(axis='y', alpha=0.3)
 
             plt.tight_layout()
-            save_path = os.path.join(visualizations_path, f"{self.task_type}_error_per_class_metrics.png")
+
+            save_path = os.path.join(self.output_dir, get_timestamped_filename("error_per_class_metrics.png", self.task_type, self.timestamp))
+
             plt.savefig(save_path, dpi=VISUALIZATION_CONFIG['dpi'], bbox_inches='tight')
             plt.close()
             print(f"✓ Per-class metrics visualization saved: {save_path}\n")
@@ -418,7 +436,9 @@ class ErrorAnalyzer:
             axes[1].grid(axis='y', alpha=0.3)
 
             plt.tight_layout()
-            save_path = os.path.join(visualizations_path, f"{self.task_type}_error_confidence.png")
+
+            save_path = os.path.join(self.output_dir, get_timestamped_filename("error_confidence.png", self.task_type, self.timestamp))
+
             plt.savefig(save_path, dpi=VISUALIZATION_CONFIG['dpi'], bbox_inches='tight')
             plt.close()
             print(f"✓ Confidence visualization saved: {save_path}\n")
@@ -537,7 +557,9 @@ class ErrorAnalyzer:
             axes[1].grid(alpha=0.3)
 
             plt.tight_layout()
-            save_path = os.path.join(visualizations_path, f"{self.task_type}_error_length_analysis.png")
+
+            save_path = os.path.join(self.output_dir, get_timestamped_filename("error_length_analysis.png", self.task_type, self.timestamp))
+
             plt.savefig(save_path, dpi=VISUALIZATION_CONFIG['dpi'], bbox_inches='tight')
             plt.close()
             print(f"✓ Length analysis visualization saved: {save_path}\n")
@@ -611,7 +633,8 @@ class ErrorAnalyzer:
 
         # Save to CSV if requested
         if save_to_csv:
-            csv_path = os.path.join(error_analysis_path, f"{self.task_type}_failure_cases_top{top_k}.csv")
+            csv_path = os.path.join(self.output_dir, f"{self.task_type}_failure_cases_top{top_k}_{self.timestamp}.csv")
+
             df_top.to_csv(csv_path, index=False)
             print(f"✓ Failure cases saved to CSV: {csv_path}\n")
 
@@ -628,7 +651,7 @@ class ErrorAnalyzer:
         """
         Module 6: Token-level attribution for failure cases using attention.
 
-        Note: Full SHAP analysis is in 24-ShapAnalyzer.py
+        Note: Full SHAP analysis is in ShapAnalyzer.py
         This provides simplified attention-based attribution.
 
         Args:
@@ -640,7 +663,7 @@ class ErrorAnalyzer:
         print_banner(f"MODULE 6: TOKEN-LEVEL ATTRIBUTION ({num_samples} samples)", width=60)
 
         print("⚠️  Note: This module provides simplified attention-based attribution.")
-        print("   For full SHAP analysis, use 24-ShapAnalyzer.py\n")
+        print("   For full SHAP analysis, use ShapAnalyzer.py\n")
 
         # Get failure cases
         incorrect_mask = self.predictions != self.true_labels
@@ -689,7 +712,7 @@ class ErrorAnalyzer:
             print()
 
         print(f"✓ Analyzed {len(attribution_results)} failure cases")
-        print(f"  For detailed SHAP attribution, run 21-ShapAnalyzer.py\n")
+        print(f"  For detailed SHAP attribution, run ShapAnalyzer.py\n")
 
         result = {
             'num_samples': len(attribution_results),
@@ -756,9 +779,31 @@ class ErrorAnalyzer:
             Path to saved file
         """
         if output_path is None:
+            # Get base experiment name (strip timestamp if present)
+            exp_name = EXPERIMENT_CONFIG['experiment_name']
+            
+            # Remove timestamp from experiment name if it has one
+            # Pattern: dual_RoBERTa_classifier_20251117_1126 -> dual_RoBERTa_classifier
+            parts = exp_name.split('_')
+            if len(parts) >= 4:
+                # Check if last 2 parts are timestamp (YYYYMMDD_HHMM)
+                if len(parts[-2]) == 8 and parts[-2].isdigit() and len(parts[-1]) == 4 and parts[-1].isdigit():
+                    # Remove timestamp parts
+                    base_name = '_'.join(parts[:-2])
+                else:
+                    base_name = exp_name
+            else:
+                base_name = exp_name
+            
+            # Build filename with model timestamp (REQUIRED)
+            if self.timestamp is None:
+                raise ValueError(f"❌ ERROR: timestamp parameter is required for error analysis! Cannot create file without model training timestamp.")
+            
+            filename = f"{base_name}_{self.timestamp}_{self.task_type}_error_analysis.pkl"
+            
             output_path = os.path.join(
-                results_path,
-                f"{EXPERIMENT_CONFIG['experiment_name']}_{self.task_type}_error_analysis.pkl"
+                self.output_dir,
+                filename
             )
 
         # Use ensure_dir_exists from Utils instead of os.makedirs
@@ -776,7 +821,8 @@ class ErrorAnalyzer:
 # CONVENIENCE FUNCTION
 # =============================================================================
 
-def run_error_analysis(model, dataset, tokenizer, device, class_names, task_type='refusal') -> Dict:
+def run_error_analysis(model, dataset, tokenizer, device, class_names, task_type='refusal', output_dir=None, timestamp=None) -> Dict:
+
     """
     Quick function to run complete error analysis.
 
@@ -787,6 +833,7 @@ def run_error_analysis(model, dataset, tokenizer, device, class_names, task_type
         device: torch device
         class_names: List of class names
         task_type: 'refusal' or 'jailbreak'
+        output_dir: Directory to save visualizations (default: error_analysis_path)
 
     Returns:
         Complete analysis results
@@ -797,7 +844,9 @@ def run_error_analysis(model, dataset, tokenizer, device, class_names, task_type
         tokenizer=tokenizer,
         device=device,
         class_names=class_names,
-        task_type=task_type
+        task_type=task_type,
+        output_dir=output_dir,
+        timestamp=timestamp
     )
 
     # Use config value for top_k_failures
