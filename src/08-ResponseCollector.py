@@ -14,7 +14,7 @@
 class ResponseCollector:
     """Collect responses from multiple LLM models with enhanced parallel processing."""
 
-    def __init__(self, claude_key: str, openai_key: str, google_key: str):
+    def __init__(self, claude_key: str, openai_key: str, google_key: None):
         """
         Initialize response collector.
 
@@ -25,8 +25,15 @@ class ResponseCollector:
         """
         self.anthropic_client = Anthropic(api_key=claude_key)
         self.openai_client = OpenAI(api_key=openai_key)
-        genai.configure(api_key=google_key)
-        self.gemini_model = genai.GenerativeModel(API_CONFIG['response_models']['gemini'])
+        
+        #genai.configure(api_key=google_key)
+        #self.gemini_model = genai.GenerativeModel(API_CONFIG['response_models']['gemini'])
+        
+        if google_key and 'gemini' in API_CONFIG['response_models']:
+            genai.configure(api_key=google_key)
+            self.gemini_model = genai.GenerativeModel(API_CONFIG['response_models']['gemini'])
+        else:
+            self.gemini_model = None
         
         # Use config values - NO HARDCODING!
         self.models = list(API_CONFIG['response_models'].values())
@@ -35,21 +42,41 @@ class ResponseCollector:
         self.max_retries = API_CONFIG['max_retries']
         self.rate_limit_backoff = API_CONFIG['rate_limit_backoff']
         
-        # Model-specific rate limiters (each API has different limits!)
-        self.model_rate_limiters = {
-            'claude': DynamicRateLimiter(
-                initial_workers=API_CONFIG.get('claude_workers', 3),
-                initial_delay=API_CONFIG.get('claude_delay', 0.2)
-            ),
-            'gpt5': DynamicRateLimiter(
-                initial_workers=API_CONFIG.get('gpt5_workers', 5),
-                initial_delay=API_CONFIG.get('gpt5_delay', 0.1)
-            ),
-            'gemini': DynamicRateLimiter(
-                initial_workers=API_CONFIG.get('gemini_workers', 10),
-                initial_delay=API_CONFIG.get('gemini_delay', 0.05)
-            )
-        }
+        self.model_rate_limiters = {}
+        for model_key in self.model_keys:
+            if model_key == 'claude':
+                self.model_rate_limiters[model_key] = DynamicRateLimiter(
+                    initial_workers=API_CONFIG.get('claude_workers', 3),
+                    initial_delay=API_CONFIG.get('claude_delay', 0.2)
+                )
+            elif model_key == 'gpt5':
+                self.model_rate_limiters[model_key] = DynamicRateLimiter(
+                    initial_workers=API_CONFIG.get('gpt5_workers', 5),
+                    initial_delay=API_CONFIG.get('gpt5_delay', 0.1)
+                )
+            elif model_key == 'gemini':
+                self.model_rate_limiters[model_key] = DynamicRateLimiter(
+                    initial_workers=API_CONFIG.get('gemini_workers', 10),
+                    initial_delay=API_CONFIG.get('gemini_delay', 0.05)
+                )
+        
+# =============================================================================
+#         # Model-specific rate limiters (each API has different limits!)
+#         self.model_rate_limiters = {
+#             'claude': DynamicRateLimiter(
+#                 initial_workers=API_CONFIG.get('claude_workers', 3),
+#                 initial_delay=API_CONFIG.get('claude_delay', 0.2)
+#             ),
+#             'gpt5': DynamicRateLimiter(
+#                 initial_workers=API_CONFIG.get('gpt5_workers', 5),
+#                 initial_delay=API_CONFIG.get('gpt5_delay', 0.1)
+#             ),
+#             'gemini': DynamicRateLimiter(
+#                 initial_workers=API_CONFIG.get('gemini_workers', 10),
+#                 initial_delay=API_CONFIG.get('gemini_delay', 0.05)
+#             )
+#         }
+# =============================================================================
         
         # Token counter for API usage tracking
         self.tokenizer = tiktoken.get_encoding("cl100k_base")
@@ -436,8 +463,10 @@ class ResponseCollector:
                     return self._query_claude(prompt)
                 elif model_key == 'gpt5':
                     return self._query_gpt5(prompt)
+                
                 elif model_key == 'gemini':
                     return self._query_gemini(prompt)
+                
                 else:
                     raise ValueError(f"Unknown model key: {model_key}")
                     
