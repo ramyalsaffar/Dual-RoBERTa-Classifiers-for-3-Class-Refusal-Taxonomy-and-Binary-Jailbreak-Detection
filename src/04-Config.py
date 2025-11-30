@@ -15,16 +15,16 @@
 #-----------------------------------------------
 API_CONFIG = {
     # Model Selection
-    'human_like_eval_model': 'gpt-3.5-turbo',   # For prompt quality evaluation (cheap)
+    'human_like_eval_model': 'gpt-4o',     # For prompt quality evaluation (cheap)
     'prompt_model': 'gpt-4o',                   # Model for prompt generation
     'judge_model': 'gpt-4o',                    # For actual labeling (accurate)
     'paraphrase_model': 'gpt-4o',               # Model for adversarial paraphrasing
 
     # Response Collection Models (3 models to test)
     'response_models': {
-        'claude': 'claude-sonnet-4-5-20250929',
-        'gpt5': 'gpt-5-2025-08-07',
-        'gemini': 'gemini-2.5-flash'
+        'claude': 'claude-sonnet-4-5-20250929', 
+        'gpt5': 'gpt-5.1-2025-11-13', # 'gpt5':  'gpt-5-2025-08-07'
+        #'gemini': 'gemini-3-pro-preview' # 'gemini':  'gemini-2.5-flash' 'gemini-2.5-pro'
     },
 
     # Temperature Settings
@@ -36,7 +36,7 @@ API_CONFIG = {
     # Token Limits
     'max_tokens_generate': 2000,                # For prompt generation (reduced for speed)
     'max_tokens_regenerate': 500,               # For regenerating failed prompts
-    'max_tokens_judge': 150,                     # Small JSON response for judging
+    'max_tokens_judge': 1000,                     # Small JSON response for judging
     'max_tokens_paraphrase': 200,               # For paraphrasing
     'max_tokens_response': 4096,                # For LLM responses (increased for GPT-5 reasoning tokens)
 
@@ -91,7 +91,7 @@ JAILBREAK_CONFIG = {
 #-----------------------
 TRAINING_CONFIG = {
     'batch_size': 16,                           # Batch size (reduce if OOM)
-    'epochs': 5,                                # Number of training epochs
+    'epochs': 3,                                # Number of training epochs
     'learning_rate': 2e-5,                      # Learning rate (AdamW)
     'warmup_steps': 100,                        # Warmup steps for LR scheduler
     'weight_decay': 0.01,                       # Weight decay (L2 regularization)
@@ -288,13 +288,15 @@ DATA_CLEANING_CONFIG = {
 # Experiment Configuration
 #-------------------------
 EXPERIMENT_CONFIG = {
-    'experiment_name': f'dual_RoBERTa_classifier_{get_timestamp("file")}' if 'get_timestamp' in globals() else f'dual_RoBERTa_classifier_{datetime.now().strftime("%Y%m%d_%H%M")}',
+    'experiment_name': f'dual_RoBERTa_classifier_{get_timestamp("file")}',  # Generated when experiment starts
     'save_intermediate': True,                  # Save intermediate results
     'verbose': True,                            # Print detailed logs
     'show_progress': True,                      # Show progress bars
     'prompt_buffer_percentage': 20,             # Extra prompts as buffer (%)
     'max_prompt_generation_attempts': 3,        # Retries for prompt generation
-    'test_sample_size': 50                      # Sample size for --test mode (min 50 for 3-class stratified splits)
+    'test_sample_size': 150                     # INCREASED: 50 → 300 for sufficient interpretability samples
+                                                # Rationale: 300 prompts → 45 test samples (15% split)
+                                                # Supports dynamic interpretability config tiers
 }
 
 
@@ -344,7 +346,7 @@ WILDJAILBREAK_CONFIG = {
                                                 #          vanilla_harmful, vanilla_benign
 
     # Model Attribution (NEW - V09)
-    'synthetic_model_label': 'WildJailbreak',   # Label for 'model' column in synthetic data
+    'synthetic_model_label': 'wildjailbreak',   # Label for 'model' column in synthetic data
                                                 # Used to distinguish from real model responses
                                                 # Enables filtering synthetic data from per-model analysis
 
@@ -403,44 +405,22 @@ ANALYSIS_CONFIG = {
 
 # Interpretability Configuration
 #--------------------------------
-INTERPRETABILITY_CONFIG = {
-    # Attention Visualization
-    'attention_samples_per_class': 10,          # Samples per class for attention analysis
-    'attention_layer_index': -1,                # Which layer to visualize (-1 = last layer)
-    'attention_top_k_tokens': 15,               # Number of top tokens to highlight
-    'visualize_all_layers': False,              # Whether to create all-layer comparison plots
+# DYNAMIC CONFIGURATION - Automatically scales with dataset size
+# 
+# Configuration is calculated by get_interpretability_config() in Utils.py
+# This function selects optimal settings based on test set size:
+#   - MINIMAL tier: <30 test samples (exploratory)
+#   - EXPLORATORY tier: 30-100 test samples (testing)
+#   - BALANCED tier: 100-200 test samples (serious work)
+#   - PUBLICATION tier: 200+ test samples (publication-ready)
+#
+# The function is called with explicit values from DATASET_CONFIG - no imports needed!
 
-    # SHAP Analysis
-    'shap_enabled': True,                       # Enable SHAP analysis (requires shap package)
-    'shap_samples': 20,                         # Number of samples for SHAP analysis
-    'shap_samples_per_class': 2,                # Number of SHAP samples to visualize per class
-    'shap_background_samples': 50,              # Background samples for SHAP explainer
-    'shap_max_display': 20,                     # Max features to display in summary plots
-
-    # Statistical Agreement Thresholds (Cohen's Kappa, etc.)
-    'kappa_thresholds': {
-        'almost_perfect': 0.80,                 # Almost perfect agreement (κ > 0.80)
-        'substantial': 0.60,                    # Substantial agreement (0.60 < κ ≤ 0.80)
-        'moderate': 0.40,                       # Moderate agreement (0.40 < κ ≤ 0.60)
-        'fair': 0.20,                           # Fair agreement (0.20 < κ ≤ 0.40)
-        'slight': 0.0                           # Slight agreement (0.0 < κ ≤ 0.20)
-    },
-
-    # Power Law Analysis Thresholds
-    'power_law_exponent_range': (1.0, 3.0),    # Valid range for power law exponent
-    'zipf_exponent_range': (0.8, 1.5),         # Valid range for Zipfian distribution exponent
-
-    # Calibration Thresholds (Expected Calibration Error)
-    'ece_thresholds': {
-        'excellent': 0.05,                      # ECE < 0.05 = excellent calibration
-        'good': 0.10,                           # ECE < 0.10 = good calibration
-        'acceptable': 0.15                      # ECE < 0.15 = acceptable calibration
-    },
-
-    # General Interpretability
-    'save_interpretability_results': True,      # Save interpretation results
-    'generate_example_visualizations': True     # Generate example plots per class
-}
+# Initialize with values from DATASET_CONFIG (explicit parameters - clean!)
+INTERPRETABILITY_CONFIG = get_interpretability_config(
+    total_prompts=DATASET_CONFIG['total_prompts'],
+    test_split=DATASET_CONFIG['test_split']
+)
 
 
 # Error Analysis Configuration
@@ -474,7 +454,7 @@ HYPOTHESIS_TESTING_CONFIG = {
 # Visualization Configuration
 #-----------------------------
 VISUALIZATION_CONFIG = {
-    'dpi': 150,                      # DPI for all saved plots
+    'dpi': 300,                      # DPI for all saved plots (INCREASED from 150 to 300 for crisp PDFs!)
     'figure_format': 'png',          # Output format
     'style': 'whitegrid',            # Seaborn style
     'color_palette': 'Set2',
@@ -510,6 +490,68 @@ VISUALIZATION_CONFIG = {
         'significance_marker': '***', # Marker for statistically significant differences
         'figsize_width': 10,         # Figure width
         'figsize_height': 6          # Figure height
+    }
+}
+
+
+# =============================================================================
+# MATPLOTLIB HIGH-RESOLUTION CONFIGURATION
+# =============================================================================
+# Apply DPI settings from VISUALIZATION_CONFIG to matplotlib
+# This ensures all figures are created at high resolution for PDFs
+plt.rcParams['figure.dpi'] = VISUALIZATION_CONFIG['dpi']
+plt.rcParams['savefig.dpi'] = VISUALIZATION_CONFIG['dpi']
+print(f"✓ Matplotlib DPI configured: {VISUALIZATION_CONFIG['dpi']} (high-resolution mode)")
+
+
+# =============================================================================
+# REPORT CONFIGURATION
+# =============================================================================
+REPORT_CONFIG = {
+    'pdf': {
+        'page_size': 'letter',
+        'margins': {'left': 72, 'right': 72, 'top': 72, 'bottom': 72},
+        'author': 'Ramy Al-Saffar',
+        'creator': 'Dual RoBERTa Classifiers Pipeline'
+    },
+    'images': {
+        'save_dpi': 300,
+        'embed_dpi': 300,
+        'format': 'png',
+        'bbox_inches': 'tight',
+        'pad_inches': 0.1,
+        'transparent': False,
+        'facecolor': 'white',
+        'edgecolor': 'none',
+        'max_width_inches': 6.5,
+        'max_height_inches': 8.0,
+        'default_width_inches': 5.5,
+        'default_height_inches': 4.0,
+        'figure_sizes': {
+            'confusion_matrix': (6.0, 5.0),
+            'training_curves': (7.0, 5.0),
+            'class_distribution': (6.0, 4.0),
+            'per_class_metrics': (6.5, 4.5),
+            'roc_curve': (6.0, 5.0),
+            'precision_recall': (6.0, 5.0),
+            'confidence_distribution': (6.5, 4.0),
+            'error_analysis': (7.0, 5.5),
+            'cross_validation': (6.5, 5.0),
+            'model_comparison': (7.0, 5.0),
+            'vulnerability_heatmap': (7.0, 6.0)
+        }
+    },
+    'content': {
+        'metrics_to_report': {
+            'overall': ['accuracy', 'macro_f1', 'weighted_f1', 'macro_precision', 'macro_recall', 
+                       'cohen_kappa', 'matthews_corrcoef', 'log_loss'],
+            'per_class': ['precision', 'recall', 'f1_score', 'support', 'specificity', 'balanced_accuracy'],
+            'cross_validation': ['mean_accuracy', 'std_accuracy', 'mean_f1', 'std_f1', 'confidence_interval_95'],
+            'confidence': ['mean_confidence', 'std_confidence', 'calibration_error', 'brier_score']
+        }
+    },
+    'formatting': {
+        'decimal_places': {'metrics': 4, 'percentages': 2, 'confidence': 3, 'p_values': 4}
     }
 }
 
