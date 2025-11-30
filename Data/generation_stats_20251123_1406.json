@@ -1,0 +1,12 @@
+{
+  "total_generated": 2411,
+  "total_failed": 902,
+  "total_duplicates": 0,
+  "total_regeneration_attempts": 923,
+  "total_regenerated_success": 891,
+  "total_regenerated_failed": 11,
+  "quality_pass_rate": 99.54375777685608,
+  "api_calls": 2336,
+  "rate_limit_hits": 0,
+  "persona_success_rate": {}
+}
