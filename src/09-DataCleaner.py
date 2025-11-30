@@ -95,7 +95,7 @@ class DataCleaner:
             print("=" * 60)
         
         self.stats['original_size'] = len(df)
-        df_clean = df.copy()
+        df_clean = df
         
         # Step 1: Validate basic data integrity
         if self.verbose:
@@ -255,7 +255,73 @@ class DataCleaner:
         return df
 
     def _remove_near_duplicates(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Remove responses that are too similar for the same prompt."""
+        """
+        Remove responses that are too similar for the same prompt using MinHash LSH.
+        
+        Fast O(n) algorithm using Locality-Sensitive Hashing instead of O(n²) pairwise comparison.
+        Falls back to slower method if datasketch not installed.
+        """
+        
+        
+        drop_indices = []
+        
+        # Group by prompt for efficiency
+        prompt_groups = df.groupby('prompt')
+        
+        with tqdm(total=len(prompt_groups), desc="  Checking near-duplicates (LSH)", 
+                  disable=not self.verbose) as pbar:
+            for prompt, group in prompt_groups:
+                pbar.update(1)
+                
+                if len(group) <= 1:
+                    continue
+                
+                # Create LSH index for this prompt group
+                lsh = MinHashLSH(threshold=self.similarity_threshold, num_perm=128)
+                
+                responses = group['response'].tolist()
+                indices = group.index.tolist()
+                
+                # Process each response
+                for idx, response in enumerate(responses):
+                    original_idx = indices[idx]
+                    
+                    # Skip if already marked for removal
+                    if original_idx in drop_indices:
+                        continue
+                    
+                    # Create MinHash signature
+                    m = MinHash(num_perm=128)
+                    words = response.lower().split()
+                    
+                    # Skip empty responses
+                    if not words:
+                        continue
+                    
+                    for word in words:
+                        m.update(word.encode('utf-8'))
+                    
+                    # Query LSH for similar documents
+                    result = lsh.query(m)
+                    
+                    if result:
+                        # Found similar document - mark for removal (keep first occurrence)
+                        drop_indices.append(original_idx)
+                    else:
+                        # No similar document - add to index
+                        lsh.insert(str(original_idx), m)
+        
+        if drop_indices:
+            df = df.drop(index=drop_indices)
+        
+        return df
+
+
+    def _remove_near_duplicates_fallback(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Fallback O(n²) implementation when datasketch is not available.
+        This is the original implementation for compatibility.
+        """
         drop_indices = []
         
         # Group by prompt for efficiency
@@ -297,6 +363,7 @@ class DataCleaner:
             df = df.drop(index=drop_indices)
         
         return df
+    
 
     def _filter_length_outliers(self, df: pd.DataFrame, strategy: str) -> pd.DataFrame:
         """Filter responses/prompts that are too short or too long."""
