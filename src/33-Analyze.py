@@ -129,6 +129,7 @@ def _generate_reports(analysis_results: Dict, report_type: str):
         report_type: Type of report ('performance', 'interpretability', 'executive', 'all')
     """
     timestamp = get_timestamp('file')
+
     report_generator = ReportGenerator(class_names=CLASS_NAMES)
 
     # Load visualization figures
@@ -138,7 +139,7 @@ def _generate_reports(analysis_results: Dict, report_type: str):
 
         # Load figures
         cm_fig = plt.figure(figsize=(10, 8))
-        cm_img = mpimg.imread(os.path.join(visualizations_path, "confusion_matrix.png"))
+        cm_img = mpimg.imread(os.path.join(reporting_viz_path, "confusion_matrix.png"))
         plt.imshow(cm_img)
         plt.axis('off')
 
@@ -153,14 +154,10 @@ def _generate_reports(analysis_results: Dict, report_type: str):
                 ha='center', va='center', fontsize=14)
         plt.axis('off')
 
-        # Extract metrics
-        metrics = {
-            'accuracy': analysis_results['confidence'].get('overall_accuracy', 0),
-            'macro_f1': analysis_results['per_model'].get('analysis', {}).get('macro_avg', {}).get('f1-score', 0),
-            'weighted_f1': analysis_results['per_model'].get('analysis', {}).get('weighted_avg', {}).get('f1-score', 0),
-            'macro_precision': analysis_results['per_model'].get('analysis', {}).get('macro_avg', {}).get('precision', 0),
-            'macro_recall': analysis_results['per_model'].get('analysis', {}).get('macro_avg', {}).get('recall', 0),
-        }
+
+        # Build metrics for the refusal classifier report from analysis_results
+        metrics = build_refusal_metrics_from_results(analysis_results)
+
 
         # Add per-class metrics
         for i, class_name in enumerate(analysis_results['metadata']['refusal_class_names']):
@@ -169,6 +166,7 @@ def _generate_reports(analysis_results: Dict, report_type: str):
             metrics[f'class_{i}_recall'] = class_metrics.get('recall', 0)
             metrics[f'class_{i}_f1'] = class_metrics.get('f1-score', 0)
             metrics[f'class_{i}_support'] = class_metrics.get('support', 0)
+
 
         output_path = os.path.join(reports_path, f"performance_report_{timestamp}.pdf")
         report_generator.generate_model_performance_report(
@@ -180,6 +178,54 @@ def _generate_reports(analysis_results: Dict, report_type: str):
             output_path=output_path
         )
         plt.close('all')
+
+    # DEBUG - ADD THIS BEFORE LINE 183:
+    print(f"\n🔍 DEBUG: analysis_results keys: {analysis_results.keys()}")
+    print(f"🔍 DEBUG: 'jailbreak_results' in analysis_results: {'jailbreak_results' in analysis_results}")
+
+    # JAILBREAK REPORT
+    if 'jailbreak_results' in analysis_results:
+        print("\n📊 Generating Jailbreak Classifier Report...")
+        
+        # Use SAME report_generator, just different class names
+        jailbreak_report_gen = ReportGenerator(
+            class_names=['Jailbreak Failed', 'Jailbreak Succeeded']
+        )
+        
+        jailbreak_metrics = build_jailbreak_metrics_from_results(
+            analysis_results['jailbreak_results']
+        )
+        
+        # Same figure pattern as refusal
+        jb_cm_fig = plt.figure(figsize=(10, 8))
+        if os.path.exists(os.path.join(reporting_viz_path, "jailbreak_confusion_matrix.png")):
+            jb_cm_img = mpimg.imread(os.path.join(reporting_viz_path, "jailbreak_confusion_matrix.png"))
+            plt.imshow(jb_cm_img)
+        else:
+            plt.text(0.5, 0.5, "Jailbreak confusion matrix not available", ha='center', va='center')
+        plt.axis('off')
+        
+        jb_training_fig = plt.figure(figsize=(12, 5))
+        plt.text(0.5, 0.5, "Training curves not available", ha='center', va='center', fontsize=14)
+        plt.axis('off')
+        
+        jb_dist_fig = plt.figure(figsize=(10, 6))
+        plt.text(0.5, 0.5, "Class distribution: 2 classes", ha='center', va='center', fontsize=14)
+        plt.axis('off')
+        
+        jb_output_path = os.path.join(reports_path, f"jailbreak_performance_report_{timestamp}.pdf")
+        jailbreak_report_gen.generate_model_performance_report(
+            model_name="Jailbreak Classifier",
+            metrics=jailbreak_metrics,
+            confusion_matrix_fig=jb_cm_fig,
+            training_curves_fig=jb_training_fig,
+            class_distribution_fig=jb_dist_fig,
+            output_path=jb_output_path
+        )
+        plt.close('all')
+        print(f"✅ Jailbreak report: {jb_output_path}")
+    
+    
 
     if report_type in ['executive', 'all']:
         print("\n📊 Generating Executive Summary...")
@@ -194,7 +240,7 @@ def _generate_reports(analysis_results: Dict, report_type: str):
 
         # Performance chart
         perf_fig = plt.figure(figsize=(10, 6))
-        perf_img = mpimg.imread(os.path.join(visualizations_path, "per_class_f1.png"))
+        perf_img = mpimg.imread(os.path.join(reporting_viz_path, "per_class_f1.png"))
         plt.imshow(perf_img)
         plt.axis('off')
 
@@ -314,6 +360,8 @@ def interactive_mode():
     except Exception as e:
         print(f"\n❌ Analysis failed: {e}")
         print("   Please check model paths and test data")
+        print("\n🔍 FULL TRACEBACK:")
+        traceback.print_exc()
         return
 
     # Generate report if requested
