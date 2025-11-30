@@ -78,8 +78,13 @@ results/**
 !results/.gitkeep
 
 # Visualizations (exclude from image)
+# Lowercase (runtime generated)
 visualizations/**
 !visualizations/.gitkeep
+
+# Uppercase (permanent storage)
+Visualizations/**
+!Visualizations/.gitkeep
 
 # Reports (exclude from image)
 # Lowercase (runtime generated)
