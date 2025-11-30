@@ -113,7 +113,8 @@ class Trainer:
                  test_loader: DataLoader = None,
                  use_mixed_precision: bool = None,
                  gradient_accumulation_steps: int = 1,
-                 checkpoint_manager: CheckpointManager = None):
+                 checkpoint_manager: CheckpointManager = None,
+                 model_type: str = None):
         """
         Initialize enhanced trainer.
         
@@ -129,6 +130,7 @@ class Trainer:
             use_mixed_precision: Use automatic mixed precision
             gradient_accumulation_steps: Steps for gradient accumulation
             checkpoint_manager: Optional checkpoint manager
+            model_type: Type identifier for fallback naming ('refusal', 'jailbreak', or None)
         """
         self.model = model.to(device)
         self.train_loader = train_loader
@@ -139,6 +141,7 @@ class Trainer:
         self.scheduler = scheduler
         self.device = device
         self.gradient_accumulation_steps = gradient_accumulation_steps
+        self.model_type = model_type  # Store for fallback naming
         
         # Configuration from config - NO HARDCODING!
         self.epochs = TRAINING_CONFIG['epochs']
@@ -357,11 +360,18 @@ class Trainer:
         Returns:
             Training history dictionary
         """
+        # Create unambiguous fallback path if none provided
         if model_save_path is None:
-            model_save_path = os.path.join(
-                models_path,
-                f"{EXPERIMENT_CONFIG['experiment_name']}_best.pt"
-            )
+            # Use model_type to create descriptive filename
+            if self.model_type:
+                filename = f"{EXPERIMENT_CONFIG['experiment_name']}_{self.model_type}_best.pt"
+            else:
+                filename = f"{EXPERIMENT_CONFIG['experiment_name']}_best.pt"
+            
+            model_save_path = os.path.join(models_path, filename)
+            
+            if self.verbose:
+                print(f"⚠️  No model_save_path provided, using fallback: {os.path.basename(model_save_path)}")
         
         # Resume from checkpoint if specified
         start_epoch = 1
@@ -481,7 +491,7 @@ class Trainer:
     
     def load_checkpoint(self, path: str):
         """Load enhanced checkpoint."""
-        checkpoint = torch.load(path, map_location=self.device)
+        checkpoint = safe_load_checkpoint(path, self.device)
         
         self.model.load_state_dict(checkpoint['model_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
