@@ -34,7 +34,7 @@ class Visualizer:
         self.model_colors = MODEL_COLORS
         
         # Get visualization config - NO HARDCODING!
-        self.dpi = VISUALIZATION_CONFIG['dpi']
+        self.dpi = REPORT_CONFIG['images']['save_dpi']  # CHANGED: Use 300 DPI from REPORT_CONFIG
         self.alpha_bar = VISUALIZATION_CONFIG['alpha_bar']
         self.alpha_line = VISUALIZATION_CONFIG['alpha_line']
         self.alpha_hist = VISUALIZATION_CONFIG['alpha_hist']
@@ -46,28 +46,36 @@ class Visualizer:
     def plot_confusion_matrix(self, cm: np.ndarray, output_path: str):
         """
         Plot confusion matrix heatmap.
-
+    
         Args:
             cm: Confusion matrix (numpy array)
-            output_path: Path to save the plot
-
+            output_path: FULL PATH to save (including directory and filename)
+    
         Returns:
             Matplotlib figure object
         """
-        fig = plt.figure(figsize=(8, 6))
+        # ADDED: Ensure parent directory exists
+        ensure_dir_exists(os.path.dirname(output_path))
+        
+        # Use figure size from REPORT_CONFIG
+        img_cfg = REPORT_CONFIG['images']
+        cm_size = img_cfg['figure_sizes']['confusion_matrix']  # e.g. (6.0, 5.0)
+    
+        fig = plt.figure(figsize=cm_size)
+    
         sns.heatmap(
             cm,
             annot=True,
             fmt='d',
             cmap='Blues',
-            xticklabels=self.class_names,
-            yticklabels=self.class_names,
-            cbar_kws={'label': 'Count'}
+            cbar=True,
+            square=True
         )
-        plt.title('Confusion Matrix', fontsize=16, fontweight='bold')
-        plt.ylabel('True Label', fontsize=12)
         plt.xlabel('Predicted Label', fontsize=12)
+        plt.ylabel('True Label', fontsize=12)
+        plt.title('Confusion Matrix', fontsize=16, fontweight='bold')
         plt.tight_layout()
+    
         plt.savefig(output_path, dpi=self.dpi, bbox_inches='tight')
         print(f"✓ Saved confusion matrix to {output_path}")
         return fig
@@ -78,8 +86,11 @@ class Visualizer:
         
         Args:
             f1_scores: Dictionary mapping class names to F1 scores
-            output_path: Path to save the plot
+            output_path: FULL PATH to save (including directory and filename)
         """
+        # ADDED: Ensure parent directory exists
+        ensure_dir_exists(os.path.dirname(output_path))
+        
         plt.figure(figsize=(10, 6))
         classes = list(f1_scores.keys())
         scores = list(f1_scores.values())
@@ -117,6 +128,10 @@ class Visualizer:
             results: Dictionary with model results (expects 'f1_macro' key per model)
             output_path: Path to save the plot
         """
+        # ADDED: Ensure parent directory exists
+        ensure_dir_exists(os.path.dirname(output_path))
+        
+
         models = [m for m in results.keys() if m != 'analysis']
         f1_scores = [results[m]['f1_macro'] for m in models]
 
@@ -154,6 +169,10 @@ class Visualizer:
             results: Dictionary with 'original_f1' and 'paraphrased_f1' keys
             output_path: Path to save the plot
         """
+        # ADDED: Ensure parent directory exists
+        ensure_dir_exists(os.path.dirname(output_path))
+        
+
         dimensions = list(results['paraphrased_f1'].keys())
         paraphrased_f1 = list(results['paraphrased_f1'].values())
         original_f1 = results['original_f1']
@@ -201,6 +220,10 @@ class Visualizer:
             confidences: List of prediction confidences
             output_path: Path to save the plot
         """
+        # ADDED: Ensure parent directory exists
+        ensure_dir_exists(os.path.dirname(output_path))
+        
+
         # Dynamic subplot configuration based on number of classes
         fig, axes = plt.subplots(1, self.num_classes, figsize=(5 * self.num_classes, 4))
 
@@ -237,36 +260,42 @@ class Visualizer:
     def plot_training_curves(self, history: Dict, output_path: str):
         """
         Plot training and validation curves (loss and F1).
-
+    
         Args:
             history: Dictionary with 'train_loss', 'val_loss', 'val_f1' keys
             output_path: Path to save the plot
-
+    
         Returns:
             Matplotlib figure object
         """
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+        # ADDED: Ensure parent directory exists
+        ensure_dir_exists(os.path.dirname(output_path))
+        
 
+        img_cfg = REPORT_CONFIG['images']
+        train_size = img_cfg['figure_sizes']['training_curves']  # e.g. (7.0, 5.0)
+    
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=train_size)
+    
         epochs = range(1, len(history['train_loss']) + 1)
-
-        # Loss curves
-        ax1.plot(epochs, history['train_loss'], 'o-', label='Train Loss', color='#3498db', linewidth=2)
-        ax1.plot(epochs, history['val_loss'], 'o-', label='Val Loss', color='#e74c3c', linewidth=2)
-        ax1.set_xlabel('Epoch', fontsize=12)
-        ax1.set_ylabel('Loss', fontsize=12)
-        ax1.set_title('Training & Validation Loss', fontsize=14, fontweight='bold')
+    
+        # Loss subplot
+        ax1.plot(epochs, history['train_loss'], label='Train Loss', alpha=self.alpha_line)
+        ax1.plot(epochs, history['val_loss'], label='Val Loss', alpha=self.alpha_line)
+        ax1.set_xlabel('Epoch')
+        ax1.set_ylabel('Loss')
+        ax1.set_title('Training & Validation Loss')
         ax1.legend()
-        ax1.grid(alpha=self.alpha_grid)
-
-        # F1 curves
-        ax2.plot(epochs, history['val_f1'], 'o-', label='Val F1', color='#2ecc71', linewidth=2)
-        ax2.set_xlabel('Epoch', fontsize=12)
-        ax2.set_ylabel('F1 Score', fontsize=12)
-        ax2.set_title('Validation F1', fontsize=14, fontweight='bold')
+        ax1.grid(alpha=VISUALIZATION_CONFIG['alpha_grid'])
+    
+        # F1 subplot
+        ax2.plot(epochs, history['val_f1'], label='Val F1', alpha=self.alpha_line)
+        ax2.set_xlabel('Epoch')
+        ax2.set_ylabel('F1 Score')
+        ax2.set_title('Validation F1')
         ax2.legend()
-        ax2.grid(alpha=self.alpha_grid)
-        ax2.set_ylim([0, 1])
-
+        ax2.grid(alpha=VISUALIZATION_CONFIG['alpha_grid'])
+    
         plt.tight_layout()
         plt.savefig(output_path, dpi=self.dpi, bbox_inches='tight')
         print(f"✓ Saved training curves to {output_path}")
@@ -283,6 +312,10 @@ class Visualizer:
             matrix_df: DataFrame with models as rows, attack types as columns, values = success rate %
             output_path: Path to save the plot
         """
+        # ADDED: Ensure parent directory exists
+        ensure_dir_exists(os.path.dirname(output_path))
+        
+
         if matrix_df.empty:
             print("⚠️  No data for heatmap - skipping")
             return
@@ -339,6 +372,10 @@ class Visualizer:
             significance_results: Dict from JailbreakAnalysis._test_model_vulnerability_significance()
             output_path: Path to save the plot
         """
+        # ADDED: Ensure parent directory exists
+        ensure_dir_exists(os.path.dirname(output_path))
+        
+
         if not vulnerability_stats:
             print("⚠️  No vulnerability data - skipping comparison chart")
             return
@@ -425,35 +462,45 @@ class Visualizer:
     def plot_class_distribution(self, labels: List, output_path: str):
         """
         Plot class distribution bar chart.
-
+    
         Args:
             labels: List of class labels (integers)
             output_path: Path to save the plot
-
+    
         Returns:
             Matplotlib figure object
         """
-        fig = plt.figure(figsize=(10, 6))
+        # ADDED: Ensure parent directory exists
+        ensure_dir_exists(os.path.dirname(output_path))
+        
 
+        img_cfg = REPORT_CONFIG['images']
+        dist_size = img_cfg['figure_sizes']['class_distribution']  # e.g. (6.0, 4.0)
+    
+        fig = plt.figure(figsize=dist_size)
+    
         # Count samples per class
         unique_labels, counts = np.unique(labels, return_counts=True)
         class_names_subset = [self.class_names[i] for i in unique_labels]
-
-        # Use class colors
-        colors = [self.class_colors[i % len(self.class_colors)] for i in unique_labels]
-
+    
+        colors = [self.class_colors[i % len(self.class_colors)] for i in range(len(unique_labels))]
         bars = plt.bar(class_names_subset, counts, color=colors, alpha=self.alpha_bar, edgecolor='black')
+    
         plt.ylabel('Number of Samples', fontsize=12)
-        plt.xlabel('Class', fontsize=12)
         plt.title('Class Distribution', fontsize=16, fontweight='bold')
-
+    
         # Add value labels on bars
         for bar in bars:
             height = bar.get_height()
-            plt.text(bar.get_x() + bar.get_width()/2., height,
-                    f'{int(height)}',
-                    ha='center', va='bottom', fontsize=10)
-
+            plt.text(
+                bar.get_x() + bar.get_width() / 2.,
+                height,
+                f'{int(height)}',
+                ha='center',
+                va='bottom',
+                fontsize=10
+            )
+    
         plt.tight_layout()
         plt.savefig(output_path, dpi=self.dpi, bbox_inches='tight')
         print(f"✓ Saved class distribution to {output_path}")
