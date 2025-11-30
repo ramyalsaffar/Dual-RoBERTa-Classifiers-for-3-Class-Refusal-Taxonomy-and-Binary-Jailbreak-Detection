@@ -59,6 +59,33 @@ class PerModelAnalyzer:
         self.alpha = HYPOTHESIS_TESTING_CONFIG.get('alpha', 0.05)
         self.confidence_level = HYPOTHESIS_TESTING_CONFIG.get('confidence_level', 0.95)
     
+    def _get_model_short_key(self, model_name: str) -> str:
+        """
+        Convert full model name to short key for consistent storage.
+        
+        Args:
+            model_name: Full model name (e.g., 'claude-sonnet-4-5-20250929')
+            
+        Returns:
+            Short key (e.g., 'claude') or original name if no mapping found
+        """
+        # Build reverse mapping from API_CONFIG
+        # 'claude-sonnet-4-5-20250929' -> 'claude'
+        # 'gpt-5.1-2025-11-13' -> 'gpt5'
+        reverse_map = {v: k for k, v in API_CONFIG['response_models'].items()}
+        
+        # Check if it's already a short key (like 'wildjailbreak')
+        if model_name in API_CONFIG['response_models']:
+            return model_name
+        
+        # Check WildJailbreak synthetic label
+        if model_name == WILDJAILBREAK_CONFIG.get('synthetic_model_label', 'wildjailbreak'):
+            return 'wildjailbreak'
+        
+        # Return mapped short key or original if not found
+        return reverse_map.get(model_name, model_name)
+    
+
     def analyze(self, test_df: pd.DataFrame) -> Dict:
         """
         Analyze performance per model with statistical testing.
@@ -69,12 +96,6 @@ class PerModelAnalyzer:
         Returns:
             Dictionary with per-model results and statistical tests
         """
-        # Filter for jailbreak attempts if analyzing jailbreak classifier
-        if self.task_type == 'jailbreak' and 'is_jailbreak_attempt' in test_df.columns:
-            test_df = test_df[test_df['is_jailbreak_attempt'] == 1].copy()
-            if self.verbose:
-                print(f"Filtered to {len(test_df):,} jailbreak attempts for analysis")
-        
         # Get unique models (filter NaN)
         models = test_df['model'].dropna().unique()
         
@@ -99,10 +120,14 @@ class PerModelAnalyzer:
         all_model_preds = {}  # Store for statistical testing
         
         for model_name in models:
+            # Convert full model name to short key for consistent storage
+            short_key = self._get_model_short_key(model_name)
+            
             if self.verbose:
-                print(f"\n📊 Evaluating {get_model_display_name(model_name)}...")
+                print(f"\n📊 Evaluating {get_model_display_name(short_key)}...")
             
             model_df = test_df[test_df['model'] == model_name]
+
             
             # Get appropriate label column
             if self.task_type == 'refusal':
@@ -136,21 +161,25 @@ class PerModelAnalyzer:
                 num_workers=0  # Use 0 for inference
             )
             
+            
             # Evaluate
             preds, labels, confidences = self._evaluate(loader)
-            all_model_preds[model_name] = (preds, labels)
+            all_model_preds[short_key] = (preds, labels)
             
             # Calculate metrics with confidence intervals
             metrics = self._calculate_metrics_with_ci(preds, labels, confidences)
             
-            results['models'][model_name] = {
+            # Store results using short key for ReportGenerator compatibility
+            results['models'][short_key] = {
                 **metrics,
                 'num_samples': len(model_df),
-                'num_valid_samples': len(labels)
+                'num_valid_samples': len(labels),
+                'full_model_name': model_name  # Preserve full name for reference
             }
             
             if self.verbose:
-                self._print_model_results(model_name, results['models'][model_name])
+                self._print_model_results(short_key, results['models'][short_key])
+        
         
         # Statistical comparisons between models
         if len(results['models']) > 1:
@@ -187,9 +216,9 @@ class PerModelAnalyzer:
                     use_mc_dropout=False  # Faster for per-model analysis
                 )
                 
-                all_preds.extend(result['predictions'].cpu().numpy())
-                all_labels.extend(labels.cpu().numpy())
-                all_confidences.extend(result['confidence'].cpu().numpy())
+                all_preds.extend(result['predictions'].cpu().numpy().tolist())
+                all_labels.extend(labels.cpu().numpy().tolist())
+                all_confidences.extend(result['confidence'].cpu().numpy().tolist())
         
         return np.array(all_preds), np.array(all_labels), np.array(all_confidences)
     
@@ -228,8 +257,14 @@ class PerModelAnalyzer:
         ci_lower = np.percentile(f1_bootstrap, (1 - self.confidence_level) * 100 / 2)
         ci_upper = np.percentile(f1_bootstrap, (1 + self.confidence_level) * 100 / 2)
         
+        
         # Average confidence
         mean_confidence = np.mean(confidences)
+        
+        # Class distribution (count of samples per class)
+        class_distribution = {}
+        for i, class_name in enumerate(self.class_names):
+            class_distribution[class_name] = int(np.sum(labels == i))
         
         return {
             'accuracy': float(accuracy),
@@ -242,8 +277,10 @@ class PerModelAnalyzer:
                 self.class_names[i]: float(f1_per_class[i])
                 for i in range(len(self.class_names))
             },
-            'mean_confidence': float(mean_confidence)
+            'mean_confidence': float(mean_confidence),
+            'class_distribution': class_distribution
         }
+    
     
     def _compare_models_statistically(self, all_model_preds: Dict,
                                      model_results: Dict) -> Dict:
@@ -373,8 +410,9 @@ class PerModelAnalyzer:
         """Save results to JSON."""
         if output_path is None:
             output_path = os.path.join(
-                results_path,
+                analysis_results_path,
                 f"{EXPERIMENT_CONFIG['experiment_name']}_per_model_results.json"
+                #"per_model_results.json"
             )
 
         ensure_dir_exists(os.path.dirname(output_path))
