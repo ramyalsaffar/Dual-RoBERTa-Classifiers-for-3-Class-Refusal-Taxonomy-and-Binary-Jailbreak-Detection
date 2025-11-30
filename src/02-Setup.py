@@ -11,18 +11,41 @@
 # Device Configuration
 #---------------------
 # Auto-detect best available device
+# =============================================================================
 if torch.cuda.is_available():
-    DEVICE = torch.device('cuda')
-    try:
-        print(f"🚀 CUDA available - using GPU: {torch.cuda.get_device_name(0)}")
-    except:
-        print("🚀 CUDA available - using GPU")
+     DEVICE = torch.device('cuda')
+     try:
+         print(f"🚀 CUDA available - using GPU: {torch.cuda.get_device_name(0)}")
+     except:
+         print("🚀 CUDA available - using GPU")
 elif IS_MAC and hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-    DEVICE = torch.device('mps')
-    print("🚀 MPS available - using Apple Silicon GPU")
+     DEVICE = torch.device('mps')
+     print("🚀 MPS available - using Apple Silicon GPU")
 else:
-    DEVICE = torch.device('cpu')
-    print("⚠️  No GPU available - using CPU (training will be slow)")
+     DEVICE = torch.device('cpu')
+     print("⚠️  No GPU available - using CPU (training will be slow)")
+ 
+
+# =============================================================================
+# # Device Configuration
+# # Check if this is a training run (Steps 6-7)
+# IS_TRAINING_RUN = '--test' in sys.argv or '--full' in sys.argv
+# 
+# if IS_TRAINING_RUN:
+#     # Force CPU for training stability (MPS memory leak with CV)
+#     DEVICE = torch.device('cpu')
+#     print("🔧 FORCED CPU MODE for training stability")
+#     print("   Expected time: ~45 minutes (vs. MPS hangs after 9+ hours)")
+# else:
+#     # For non-training tasks, use GPU acceleration
+#     if torch.cuda.is_available():
+#         DEVICE = torch.device('cuda')
+#     elif IS_MAC and hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+#         DEVICE = torch.device('mps')
+#     else:
+#         DEVICE = torch.device('cpu')
+# 
+# =============================================================================
 
 
 #------------------------------------------------------------------------------
