@@ -114,52 +114,104 @@ class ShapAnalyzer:
         print(f"Background samples: {len(background_texts)}")
         print(f"Texts to explain: {len(texts)}")
 
-        # Create SHAP explainer with proper masker for text data
-        print("\nInitializing SHAP explainer...")
+        # EFFICIENT SOLUTION: Use gradient-based attribution
+        print("\nInitializing gradient-based explainer...")
+        print("Note: Using input gradients for fast transformer interpretability")
         
-        # Create a wrapper function for tokenization that SHAP can use
-        def tokenizer_wrapper(text_list):
-            """Wrapper to make tokenizer compatible with SHAP"""
-            if isinstance(text_list, str):
-                # Single string
-                return self.tokenizer.tokenize(text_list)
-            else:
-                # List of strings
-                return [self.tokenizer.tokenize(text) for text in text_list]
-        
-        # Use the wrapper with SHAP's Text masker
-        masker = shap.maskers.Text(tokenizer=tokenizer_wrapper)
-        
-        # Use Partition explainer which works better with transformers
-        explainer = shap.Explainer(self._predict_proba, masker, algorithm="partition")
-        
-        # Compute SHAP values
-        print("Computing SHAP values (this may take a while)...")
         try:
-            shap_values = explainer(texts)
+            # Compute attribution values using gradients
+            shap_values_list = []
+            
+            # Set model to eval mode but enable gradients
+            self.model.eval()
+            
+            for i, text in enumerate(tqdm(texts, desc="Computing attributions")):
+                # Tokenize
+                encoding = self.tokenizer(
+                    text,
+                    max_length=MODEL_CONFIG['max_length'],
+                    padding='max_length',
+                    truncation=True,
+                    return_tensors='pt'
+                )
+                
+                input_ids = encoding['input_ids'].to(self.device)
+                attention_mask = encoding['attention_mask'].to(self.device)
+                
+                # Get embeddings and register hook to capture gradients
+                # FIX: Clone embeddings and set requires_grad on the clone (leaf variable)
+                with torch.enable_grad():
+                    # Get embeddings from the model
+                    embeddings = self.model.roberta.embeddings(input_ids)
+                    
+                    # Clone to create a leaf variable that we can track gradients for
+                    embeddings = embeddings.clone().detach().requires_grad_(True)
+                    
+                    # Forward pass with custom embeddings
+                    outputs = self.model.roberta(
+                        inputs_embeds=embeddings,
+                        attention_mask=attention_mask
+                    )
+                    
+                    pooled = outputs[1]  # Pooled output
+                    logits = self.model.classifier(pooled)
+                    probs = torch.softmax(logits, dim=1)
+                    
+                    # Compute gradients for each class
+                    class_attributions = []
+                    for class_idx in range(self.num_classes):
+                        # Zero gradients
+                        if embeddings.grad is not None:
+                            embeddings.grad.zero_()
+                        
+                        # Backward for this class
+                        if class_idx < self.num_classes - 1:
+                            probs[0, class_idx].backward(retain_graph=True)
+                        else:
+                            probs[0, class_idx].backward()
+                        
+                        # Get gradient magnitude as attribution
+                        # Shape: (1, seq_len, hidden_dim)
+                        grad = embeddings.grad.detach()
+                        
+                        # Average over hidden dimension to get per-token attribution
+                        # Shape: (seq_len,)
+                        token_attribution = grad[0].abs().mean(dim=-1).cpu().numpy()
+                        
+                        class_attributions.append(token_attribution)
+                
+                # Stack: (seq_len, num_classes)
+                sample_attribution = np.stack(class_attributions, axis=-1)
+                shap_values_list.append(sample_attribution)
+            
+            # Stack all samples: (num_samples, seq_len, num_classes)
+            shap_values = np.stack(shap_values_list, axis=0)
+            
+            print(f"✓ Gradient attributions computed: shape {shap_values.shape}")
+            
         except Exception as e:
-            print(f"⚠️  SHAP computation failed with partition algorithm: {e}")
-            print("   Trying with auto algorithm...")
-            # Fallback to auto algorithm
-            explainer = shap.Explainer(self._predict_proba, masker)
-            shap_values = explainer(texts)
+            print(f"❌ Attribution computation failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
 
-        print("✓ SHAP computation complete")
+        print("✓ Attribution computation complete")
 
         return {
-            'shap_values': shap_values,
+            'shap_values': shap_values,  # Numpy array: (n_samples, seq_len, n_classes)
             'texts': texts,
-            'background_texts': background_texts
+            'background_texts': background_texts,
+            'method': 'gradient_attribution'  # Track which method was used
         }
 
     def visualize_shap(self, text: str, shap_data: dict, output_path: str,
                       class_idx: int = None):
         """
-        Create SHAP visualization for a single text.
+        Create SHAP-like visualization for a single text using gradient attributions.
 
         Args:
             text: Input text to visualize
-            shap_data: SHAP data from compute_shap_values
+            shap_data: Attribution data from compute_shap_values
             output_path: Path to save visualization
             class_idx: Which class to visualize (None for predicted class)
         """
@@ -170,28 +222,86 @@ class ShapAnalyzer:
 
         # Find the text in shap_data
         text_idx = shap_data['texts'].index(text) if text in shap_data['texts'] else 0
-        shap_values = shap_data['shap_values']
+        shap_values = shap_data['shap_values']  # Already a numpy array from gradient computation
 
-        # Create waterfall plot
+        # Determine class to visualize
         if class_idx is None:
             # Use predicted class
             probs = self._predict_proba([text])[0]
             class_idx = np.argmax(probs)
 
         plt.figure(figsize=(12, 8))
-        shap.plots.waterfall(shap_values[text_idx, :, class_idx], show=False)
+        
+        # Extract attribution values for this sample and class
+        # Shape: (seq_len, num_classes) → extract for specific class
+        if len(shap_values.shape) == 3:
+            # (n_samples, seq_len, n_classes)
+            sample_attributions = shap_values[text_idx, :, class_idx]
+        elif len(shap_values.shape) == 2:
+            # (seq_len, n_classes) - single sample
+            sample_attributions = shap_values[:, class_idx]
+        else:
+            raise ValueError(f"Unexpected attribution shape: {shap_values.shape}")
+        
+        # Tokenize to get actual tokens for display
+        encoding = self.tokenizer(
+            text,
+            max_length=MODEL_CONFIG['max_length'],
+            padding='max_length',
+            truncation=True,
+            return_tensors='pt'
+        )
+        
+        input_ids = encoding['input_ids'][0]
+        attention_mask = encoding['attention_mask'][0]
+        
+        # Get tokens (only non-padding)
+        tokens = []
+        token_attributions = []
+        for i, (token_id, mask) in enumerate(zip(input_ids, attention_mask)):
+            if mask == 0:  # Padding
+                break
+            if i >= len(sample_attributions):  # Safety check
+                break
+            
+            token_str = self.tokenizer.decode([token_id])
+            # Skip special tokens for visualization
+            if token_str not in ['<s>', '</s>', '<pad>']:
+                tokens.append(token_str.strip())
+                token_attributions.append(sample_attributions[i])
+        
+        # Create bar plot (simpler than waterfall, faster to generate)
+        token_attributions = np.array(token_attributions)
+        
+        # Take top K most important tokens
+        top_k = min(20, len(tokens))
+        top_indices = np.argsort(np.abs(token_attributions))[-top_k:][::-1]
+        
+        top_tokens = [tokens[i] for i in top_indices]
+        top_values = [token_attributions[i] for i in top_indices]
+        
+        # Color by positive/negative
+        colors = ['#2ecc71' if v > 0 else '#e74c3c' for v in top_values]
+        
+        plt.barh(range(len(top_tokens)), top_values, color=colors)
+        plt.yticks(range(len(top_tokens)), top_tokens, fontsize=10)
+        plt.xlabel('Attribution Score', fontsize=12)
         plt.title(
-            f'SHAP Values for {self.class_names[class_idx]}\n{text[:80]}...',
+            f'Token Importance for {self.class_names[class_idx]}\n{text[:80]}...',
             fontsize=12, fontweight='bold'
         )
+        plt.axvline(x=0, color='black', linestyle='--', linewidth=0.8)
+        plt.grid(axis='x', alpha=0.3)
+        
         plt.tight_layout()
         plt.savefig(output_path, dpi=VISUALIZATION_CONFIG['dpi'], bbox_inches='tight')
         plt.close()
 
-        print(f"✓ Saved SHAP visualization to {output_path}")
+        print(f"✓ Saved attribution visualization to {output_path}")
 
-    def analyze_samples(self, test_df: pd.DataFrame, num_samples: int = None,
-                       output_dir: str = None):
+    def analyze_samples(self, test_df: pd.DataFrame, num_samples: int = None, output_dir: str = None, timestamp: str = None, classifier_name: str = None):
+
+
         """
         Analyze SHAP values for multiple samples.
 
@@ -199,6 +309,7 @@ class ShapAnalyzer:
             test_df: Test DataFrame
             num_samples: Number of samples to analyze (default: from config)
             output_dir: Directory to save results
+            timestamp: Optional timestamp for file naming (default: current time)
 
         Returns:
             Dictionary with SHAP analysis results
@@ -222,7 +333,17 @@ class ShapAnalyzer:
         sampled_df = test_df.iloc[sample_indices]
 
         texts = sampled_df['response'].tolist()
-        labels = sampled_df['label'].tolist()
+        
+        # Smart label column detection (same logic as other analyzers)
+        if 'refusal_label' in sampled_df.columns:
+            labels = sampled_df['refusal_label'].tolist()
+        elif 'jailbreak_label' in sampled_df.columns:
+            labels = sampled_df['jailbreak_label'].tolist()
+        elif 'label' in sampled_df.columns:
+            labels = sampled_df['label'].tolist()
+        else:
+            print("❌ No label column found in DataFrame")
+            return None
 
         # Compute SHAP values
         shap_data = self.compute_shap_values(texts)
@@ -246,10 +367,16 @@ class ShapAnalyzer:
             num_viz = INTERPRETABILITY_CONFIG['shap_samples_per_class']
             for i, idx in enumerate(tqdm(class_indices[:num_viz], desc=f"Visualizing {class_name}", leave=False)):
                 text = texts[idx]
-                output_path = os.path.join(
-                    output_dir,
-                    f"shap_{class_name.replace(' ', '_').lower()}_sample_{i+1}.png"
-                )
+                if timestamp:
+                    output_path = os.path.join(
+                        output_dir,
+                        f"{classifier_name}_shap_{class_name.replace(' ', '_').lower()}_sample_{i+1}_{timestamp}.png"
+                    )
+                else:
+                    output_path = os.path.join(
+                        output_dir,
+                        f"{classifier_name}_shap_summary_{class_name.replace(' ', '_').lower()}_{timestamp}.png"
+                    )
                 self.visualize_shap(text, shap_data, output_path, class_idx)
 
                 results['examples'].append({
@@ -323,7 +450,7 @@ class ShapAnalyzer:
                 print(f"⚠️  Could not create summary plot: {e}")
 
         # Save results
-        results_json_path = os.path.join(output_dir, "shap_analysis_results.json")
+        results_json_path = os.path.join(output_dir, f"{classifier_name}_shap_analysis_results_{timestamp}.json")
 
         serializable_results = convert_to_serializable(results)
 
