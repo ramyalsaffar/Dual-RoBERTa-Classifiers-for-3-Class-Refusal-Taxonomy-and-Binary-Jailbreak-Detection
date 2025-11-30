@@ -164,10 +164,10 @@ class ConfidenceAnalyzer:
                     use_mc_dropout=False
                 )
                 
-                all_preds.extend(result['predictions'].cpu().numpy())
-                all_labels.extend(labels.cpu().numpy())
-                all_confidences.extend(result['confidence'].cpu().numpy())
-                all_probs.extend(result['probabilities'].cpu().numpy())
+                all_preds.extend(result['predictions'].cpu().numpy().tolist())
+                all_labels.extend(labels.cpu().numpy().tolist())
+                all_confidences.extend(result['confidence'].cpu().numpy().tolist())
+                all_probs.extend(result['probabilities'].cpu().numpy().tolist())
         
         return {
             'predictions': np.array(all_preds),
@@ -201,13 +201,13 @@ class ConfidenceAnalyzer:
                 n_samples=20  # More samples for better uncertainty estimation
             )
             
-            all_results['predictions'].extend(result['predictions'].cpu().numpy())
-            all_results['labels'].extend(labels.cpu().numpy())
-            all_results['confidences'].extend(result['confidence'].cpu().numpy())
-            all_results['probabilities'].extend(result['probabilities'].cpu().numpy())
-            all_results['epistemic_uncertainty'].extend(result['epistemic_uncertainty'].cpu().numpy())
-            all_results['aleatoric_uncertainty'].extend(result['aleatoric_uncertainty'].cpu().numpy())
-            all_results['total_uncertainty'].extend(result['total_uncertainty'].cpu().numpy())
+            all_results['predictions'].extend(result['predictions'].cpu().numpy().tolist())
+            all_results['labels'].extend(labels.cpu().numpy().tolist())
+            all_results['confidences'].extend(result['confidence'].cpu().numpy().tolist())
+            all_results['probabilities'].extend(result['probabilities'].cpu().numpy().tolist())
+            all_results['epistemic_uncertainty'].extend(result['epistemic_uncertainty'].cpu().numpy().tolist())
+            all_results['aleatoric_uncertainty'].extend(result['aleatoric_uncertainty'].cpu().numpy().tolist())
+            all_results['total_uncertainty'].extend(result['total_uncertainty'].cpu().numpy().tolist())
         
         # Convert to arrays
         for key in all_results:
@@ -232,7 +232,7 @@ class ConfidenceAnalyzer:
             'std_confidence': float(np.std(confidences)),
             'mean_confidence_correct': float(np.mean(correct_confidences)) if len(correct_confidences) > 0 else 0.0,
             'mean_confidence_incorrect': float(np.mean(incorrect_confidences)) if len(incorrect_confidences) > 0 else 0.0,
-            'confidence_gap': float(np.mean(correct_confidences) - np.mean(incorrect_confidences)) if len(incorrect_confidences) > 0 else 0.0,
+            'confidence_gap': float(np.mean(correct_confidences) - np.mean(incorrect_confidences)) if len(correct_confidences) > 0 and len(incorrect_confidences) > 0 else 0.0,
             'cohen_kappa': float(kappa),
             'accuracy': float(np.mean(correct))
         }
@@ -277,10 +277,22 @@ class ConfidenceAnalyzer:
             brier_score += (1 - true_class_prob) ** 2
         brier_score /= len(labels)
         
+        # Log Loss (cross-entropy loss)
+        # log_loss = -1/N * sum(log(P(true_class)))
+        log_loss_value = 0.0
+        epsilon = 1e-15  # Small value to avoid log(0)
+        for i in range(len(labels)):
+            true_class_prob = probabilities[i, labels[i]]
+            # Clip probability to avoid log(0)
+            true_class_prob = np.clip(true_class_prob, epsilon, 1 - epsilon)
+            log_loss_value -= np.log(true_class_prob)
+        log_loss_value /= len(labels)
+        
         return {
             'ece': float(ece),
             'mce': float(mce),
             'brier_score': float(brier_score),
+            'log_loss': float(log_loss_value),  # NEW!
             'bin_accuracies': bin_accuracies,
             'bin_confidences': bin_confidences,
             'bin_counts': bin_counts,
@@ -330,12 +342,18 @@ class ConfidenceAnalyzer:
                 alternative='greater'
             )
             
+            variance_sum = np.var(correct_confidences) + np.var(incorrect_confidences)
+            if variance_sum > 0:
+                effect_size = float((np.mean(correct_confidences) - np.mean(incorrect_confidences)) / 
+                                   np.sqrt(variance_sum / 2))
+            else:
+                effect_size = 0.0  # No variance means no measurable effect
+            
             tests['correct_vs_incorrect'] = {
                 't_statistic': float(t_stat),
                 'p_value': float(p_value),
                 'significant': p_value < self.alpha,
-                'effect_size': float((np.mean(correct_confidences) - np.mean(incorrect_confidences)) / 
-                                   np.sqrt((np.var(correct_confidences) + np.var(incorrect_confidences)) / 2))
+                'effect_size': effect_size
             }
         
         # Test if confidences are well-calibrated (uniformly distributed)
@@ -456,8 +474,9 @@ class ConfidenceAnalyzer:
         """Save results to JSON."""
         if output_path is None:
             output_path = os.path.join(
-                results_path,
+                analysis_results_path,
                 f"{EXPERIMENT_CONFIG['experiment_name']}_confidence_analysis.json"
+                #"confidence_analysis.json"
             )
 
         ensure_dir_exists(os.path.dirname(output_path))
