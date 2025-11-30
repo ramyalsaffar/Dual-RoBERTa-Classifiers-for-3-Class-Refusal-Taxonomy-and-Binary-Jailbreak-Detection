@@ -49,8 +49,8 @@ class JailbreakClassifier(nn.Module):
         
         # Use config values - NO HARDCODING!
         self.num_classes = num_classes
-        self.model_name = model_name or MODEL_CONFIG['model_name']
-        self.dropout_prob = dropout or MODEL_CONFIG['dropout']
+        self.model_name = model_name or JAILBREAK_CONFIG['model_name']
+        self.dropout_prob = dropout or JAILBREAK_CONFIG['dropout']
         self.temperature = temperature
         self.use_class_weights = use_class_weights
         
@@ -227,7 +227,7 @@ class JailbreakClassifier(nn.Module):
         Args:
             num_layers_to_freeze: Number of encoder layers to freeze
         """
-        num_layers_to_freeze = num_layers_to_freeze or MODEL_CONFIG.get('freeze_layers', 0)
+        num_layers_to_freeze = num_layers_to_freeze or JAILBREAK_CONFIG.get('freeze_layers', 0)
         
         if num_layers_to_freeze == 0:
             return
