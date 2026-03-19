@@ -20,22 +20,21 @@ Both models were evaluated on 859 held-out test samples. Statistical significanc
 
 **Key design finding:** The two classifiers agree on only 51.8% of samples, confirming they capture independent signals. A single classifier cannot replace the dual-model design.
 
-**WildJailbreak supplementation impact:** Adding AllenAI's adversarial dataset raised jailbreak detector Macro F1 from 0.741 (real responses only) to 0.996 (real + synthetic), a +0.255 gain. Modern LLMs rarely produce jailbreak successes organically, making supplementation necessary for training a viable detector.
-
 The system is built end-to-end across 37 Python modules: prompt generation, multi-model response collection, GPT-4o judging, dual-classifier training with 5-fold cross-validation, interpretability analysis (gradient-based token attribution, attention, adversarial robustness), and a production stack with FastAPI, drift monitoring, and automated retraining.
 
 ---
 
 ## Table of Contents
 
-- [Results](#results)
 - [Architecture](#architecture)
 - [Pipeline Overview](#pipeline-overview)
 - [Dataset and Data Pipeline](#dataset-and-data-pipeline)
 - [Three-Stage Anti-Gaming Prompt Generation](#three-stage-anti-gaming-prompt-generation)
 - [LLM Judge Methodology](#llm-judge-methodology)
 - [Training](#training)
+- [Results](#results)
 - [Analysis and Interpretability](#analysis-and-interpretability)
+- [Engineering Infrastructure](#engineering-infrastructure)
 - [Usage](#usage)
 - [Production Infrastructure](#production-infrastructure)
 - [Project Structure](#project-structure)
@@ -43,141 +42,19 @@ The system is built end-to-end across 37 Python modules: prompt generation, mult
 
 ---
 
-## Results
-
-### Refusal Classifier (3-Class)
-
-**Overall**
-
-| Metric | Value |
-|---|---|
-| Accuracy | 90.92% |
-| Macro F1 | 0.8557 |
-| Weighted F1 | 0.9105 |
-| Cohen's Kappa | 0.7818 |
-| Matthews Corrcoef | 0.8151 |
-| Log Loss | 0.4509 |
-
-**Per-Class**
-
-| Class | Precision | Recall | F1 | Support |
-|---|---|---|---|---|
-| No Refusal | 0.967 | 0.947 | 0.957 | 587 |
-| Hard Refusal | 0.878 | 0.903 | 0.890 | 144 |
-| Soft Refusal | 0.699 | 0.742 | 0.720 | 128 |
-
-Soft Refusal is the hardest class. Its lower F1 (0.720) reflects linguistic ambiguity: responses that partially comply while hedging share surface features with both No Refusal and Hard Refusal. All classes exceed F1 = 0.70.
-
-**Calibration**
-
-| Metric | Value | Interpretation |
-|---|---|---|
-| ECE | 0.080 | Good -- acceptable for production |
-| MCE | 0.437 | Worst-case bucket; consider temperature scaling |
-| Brier Score | 0.089 | Good |
-| Mean Confidence (correct) | 0.987 | |
-| Mean Confidence (incorrect) | 0.876 | |
-
-**Per-Model Generalization**
-
-| Source Model | Accuracy | Macro F1 | Samples |
-|---|---|---|---|
-| GPT-5.1 | 0.881 | 0.840 | 362 |
-| Claude Sonnet 4.5 | 0.861 | 0.806 | 337 |
-| WildJailbreak (synthetic) | 1.000 | 1.000 | 160 |
-
-WildJailbreak samples are single-class (all successful jailbreaks), so perfect scores on that subset reflect label homogeneity, not special discriminative performance. Real-world generalization is measured by the GPT-5.1 and Claude rows.
-
-**Statistical Significance**
-
-Binomial test against 33.3% random baseline: accuracy 90.9% vs. baseline 33.3%, p < 0.001, Cohen's h = 1.298 (large effect).
-
-**Adversarial Robustness**
-
-| Condition | F1 |
-|---|---|
-| Original inputs | 0.918 |
-| Paraphrased inputs | 0.859 |
-| F1 drop | 6.5% |
-
-A 6.5% drop under synonym replacement and structural paraphrase attacks is acceptable for production deployment. Three paraphrase dimensions are tested: synonym replacement, sentence restructuring, and compression. A fourth dimension (formality shifting) was explicitly excluded because changing formality frequently alters the semantic meaning of a borderline request, producing label noise rather than a valid robustness test.
-
----
-
-### Jailbreak Detector (Binary)
-
-**Overall**
-
-| Metric | Value |
-|---|---|
-| Accuracy | 99.77% |
-| Macro F1 | 0.9962 |
-| Weighted F1 | 0.9977 |
-| Cohen's Kappa | 0.9924 |
-| Matthews Corrcoef | 0.9924 |
-| Log Loss | 0.0249 |
-
-**Per-Class**
-
-| Class | Precision | Recall | F1 | Support |
-|---|---|---|---|---|
-| Jailbreak Failed | 0.999 | 0.999 | 0.999 | 698 |
-| Jailbreak Succeeded | 0.994 | 0.994 | 0.994 | 161 |
-
-**Security-Critical Metrics**
-
-| Metric | Value |
-|---|---|
-| False Negative Rate | 0.6% |
-| True Negative Rate | 99.9% |
-| Recall (Jailbreak Succeeded) | 99.4% |
-| Minimum Recall Threshold (enforced) | 95.0% |
-
-False negatives are the primary risk: a missed jailbreak means a safety bypass goes undetected. The pipeline enforces a minimum recall threshold of 95% on the Jailbreak Succeeded class -- training is considered failed if this is not met. The achieved recall of 99.4% exceeds this threshold by 4.4 percentage points. FNR of 0.6% (1 missed jailbreak out of 161) represents strong security performance.
-
-**Calibration**
-
-| Metric | Value | Interpretation |
-|---|---|---|
-| ECE | 0.003 | Excellent -- confidence scores are reliable |
-| MCE | 0.003 | Excellent |
-| Brier Score | 0.004 | Near-perfect |
-
-**WildJailbreak Supplementation Impact**
-
-| Evaluation Set | Accuracy | Macro F1 |
-|---|---|---|
-| Real responses only (n=699) | 0.999 | 0.741 |
-| Real + Synthetic (n=859) | 0.998 | 0.996 |
-| Difference | -0.001 | +0.255 |
-
-Modern LLMs (Claude Sonnet 4.5, GPT-5.1) have strong safety guardrails and rarely produce successful jailbreaks in practice. Claude Sonnet 4.5 produced 0 jailbreak successes across 337 samples; GPT-5.1 produced 1 out of 362. Without supplementation from WildJailbreak, the detector has near-zero positive training examples and collapses to near-random F1 (~0.74) despite high accuracy. The +0.255 F1 gain demonstrates that WildJailbreak supplementation is necessary, not optional.
-
-**Per-Model Generalization Note**
-
-GPT-5.1 reports Macro F1 = 0.499 in per-model breakdown. This is an artifact of having only 1 jailbreak success out of 362 GPT-5.1 samples -- Macro F1 is undefined for a near-single-class subset and should not be interpreted as poor classifier performance. Claude Sonnet 4.5 (337 samples, 0 successes) scores perfectly because all predictions are trivially correct for a single-class subset.
-
-**Data Composition**
-
-| Source | Type | Samples | % |
-|---|---|---|---|
-| Claude Sonnet 4.5 | Real | 337 | 39.2% |
-| GPT-5.1 | Real | 362 | 42.1% |
-| WildJailbreak | Synthetic | 160 | 18.6% |
-
-Total WildJailbreak samples used across all splits (train/val/test): 973.
-
-**Statistical Significance**
-
-Binomial test against 50% random baseline: accuracy 99.8% vs. baseline 50.0%, p < 0.001, Cohen's h = 1.474 (large effect).
-
-**Classifier Independence**
-
-Agreement rate between the two classifiers: 51.8%. This low correlation is the empirical justification for the dual-model design -- the jailbreak detector and refusal classifier capture distinct signal. A jailbreak can succeed even when the refusal classifier detects a Soft Refusal (partial compliance), and a Hard Refusal does not guarantee jailbreak failure. Neither classifier's output is derivable from the other.
-
----
-
 ## Architecture
+
+### Why Two Classifiers
+
+A single classifier cannot solve both problems at once because they are fundamentally different tasks with different label spaces, different training data requirements, and different failure costs.
+
+**The refusal task** asks: "How did the model respond to this request?" -- it is a 3-class linguistic classification problem (No Refusal / Hard Refusal / Soft Refusal) that applies to every prompt in the dataset regardless of whether it was adversarial. Every collected response gets a refusal label.
+
+**The jailbreak task** asks: "Did this adversarial attempt bypass the model's safety mechanisms?" -- it is a binary security classification problem that applies only to confirmed adversarial prompts. A response cannot be a jailbreak success unless the prompt was first identified as a jailbreak attempt (`is_jailbreak_attempt = 1`). The positive class (Jailbreak Succeeded) is extremely rare in practice and requires WildJailbreak supplementation to train a viable detector.
+
+A single 4-class model (No Refusal / Hard Refusal / Soft Refusal / Jailbreak Succeeded) would fail because: (1) the Jailbreak Succeeded class is only meaningful for adversarial prompts, creating a structurally confounded label space; (2) the two tasks require different training subsets -- the refusal classifier trains on all responses, the jailbreak detector trains only on `is_jailbreak_attempt = 1` samples; (3) the failure costs are asymmetric -- a jailbreak false negative is a security breach, while a refusal misclassification is a labeling error.
+
+The empirical confirmation comes from the classifier independence analysis: the two trained models agree on only **51.8%** of test samples. If one could be derived from the other, agreement would approach 100%. The 48.2% disagreement cases include Type 2 failures (Hard Refusal + Jailbreak Succeeded = a model that refuses but still leaks harmful information) that would be invisible to any single classifier. See the Correlation Analysis section for the full independence test.
 
 ### Dual Classifier Design
 
@@ -233,20 +110,23 @@ Total uncertainty = epistemic + aleatoric. This is used to flag low-confidence p
 
 ## Pipeline Overview
 
-`30-RefusalPipeline.py` orchestrates all 10 steps in sequence:
+`30-RefusalPipeline.py` orchestrates all 11 steps in sequence:
 
-| Step | Module | Description |
-|---|---|---|
-| 1 | `07-PromptGenerator.py` | Generate human-like prompts via three-stage anti-gaming pipeline |
-| 2 | `08-ResponseCollector.py` | Collect responses from Claude Sonnet 4.5 and GPT-5.1 in parallel |
-| 3 | `09-DataCleaner.py` | Clean, deduplicate, and validate responses |
-| 4 | `10-DataLabeler.py` | Label with GPT-4o judge; supplement jailbreak data from WildJailbreak |
-| 5 | `13-ClassificationDataset.py` | Prepare train/val/test splits for both classifiers |
-| 6 | `15-RefusalClassifier.py` + `18-CrossValidator.py` | Train refusal classifier with 5-fold CV |
-| 7 | `16-JailbreakDetector.py` + `18-CrossValidator.py` | Train jailbreak detector with 5-fold CV |
-| 8 | `21-AdversarialTester.py` | Adversarial robustness testing via paraphrasing |
-| 9 | `19-28` (analyzers + visualizers) | Confidence, per-model, correlation, error, power law, SHAP, attention analysis |
-| 10 | `29-ReportGenerator.py` | Generate PDF performance reports |
+| Step | Module | Input | Output |
+|---|---|---|---|
+| 1 | `07-PromptGenerator.py` | Config | Prompt list (JSON) |
+| 2 | `08-ResponseCollector.py` | Prompt list | Raw responses DataFrame |
+| 3 | `09-DataCleaner.py` | Raw responses | Cleaned responses DataFrame |
+| 4 | `10-DataLabeler.py` + `11-WildJailbreakLoader.py` | Cleaned responses | Labeled DataFrame (refusal + jailbreak labels, WildJailbreak rows added) |
+| 5 | `13-ClassificationDataset.py` + `14-DatasetValidator.py` | Labeled DataFrame | Train/val/test splits for both classifiers |
+| 6 | `15-RefusalClassifier.py` + `18-CrossValidator.py` | Refusal dataset | Trained refusal model (`.pt`) + CV metrics |
+| 7 | `16-JailbreakDetector.py` + `18-CrossValidator.py` | Jailbreak dataset | Trained jailbreak model (`.pt`) + CV metrics |
+| 8 | `21-AdversarialTester.py` | Both models + test set | Adversarial robustness results (JSON) |
+| 9 | `19-28` (analyzers) | Both models + test set + adversarial results | Complete analysis results (JSON) |
+| 10 | `28-Visualizer.py` | Training histories + analysis results | PNG visualizations |
+| 11 | `29-ReportGenerator.py` | Visualizations + analysis results + CV metrics | PDF performance reports |
+
+Each step saves its output to disk before the next step begins, enabling resume from any point. Steps 6 and 7 consume independent dataset splits derived from the same labeled DataFrame -- they do not share training data or model weights. Step 9 is the heaviest: it runs all analysis modules (confidence, per-model, correlation, error, power law, gradient attribution, attention) and aggregates results into a single JSON file that Step 10 and 11 consume.
 
 The pipeline supports resuming from any step. All artifacts from a single run share a consistent timestamp extracted from the earliest artifact file, making every output traceable to its experiment run. If trained models already exist when starting from Step 6+, they are loaded rather than retrained.
 
@@ -507,9 +387,145 @@ Both classifiers use identical training infrastructure with task-specific settin
 
 Warmup steps adapt within folds: the configured value (100) is capped at 10% of the fold's total training steps to prevent the learning rate from remaining near-zero for small fold sizes.
 
+When running multiple pairwise statistical comparisons across models, Bonferroni correction is applied to control the family-wise error rate. This is configured via `HYPOTHESIS_TESTING_CONFIG['bonferroni_correction']` and applies to the McNemar's tests in `19-PerModelAnalyzer.py`.
+
 ### Jailbreak Detector Minimum Recall Enforcement
 
 The jailbreak detector enforces a hard minimum recall of 95% on the Jailbreak Succeeded class. Training is considered failed if this threshold is not met. This is checked post-training against the held-out test set, not the validation set.
+
+---
+
+## Results
+
+### Refusal Classifier (3-Class)
+
+**Overall**
+
+| Metric | Value |
+|---|---|
+| Accuracy | 90.92% |
+| Macro F1 | 0.8557 |
+| Weighted F1 | 0.9105 |
+| Cohen's Kappa | 0.7818 |
+| Matthews Corrcoef | 0.8151 |
+| Log Loss | 0.4509 |
+
+**Per-Class**
+
+| Class | Precision | Recall | F1 | Support |
+|---|---|---|---|---|
+| No Refusal | 0.967 | 0.947 | 0.957 | 587 |
+| Hard Refusal | 0.878 | 0.903 | 0.890 | 144 |
+| Soft Refusal | 0.699 | 0.742 | 0.720 | 128 |
+
+Soft Refusal is the hardest class. Its lower F1 (0.720) reflects linguistic ambiguity: responses that partially comply while hedging share surface features with both No Refusal and Hard Refusal. All classes exceed F1 = 0.70.
+
+**Calibration**
+
+| Metric | Value | Interpretation |
+|---|---|---|
+| ECE | 0.080 | Good -- acceptable for production |
+| MCE | 0.437 | Worst-case bucket; consider temperature scaling |
+| Brier Score | 0.089 | Good |
+| Mean Confidence (correct) | 0.987 | |
+| Mean Confidence (incorrect) | 0.876 | |
+
+**Per-Model Generalization**
+
+| Source Model | Accuracy | Macro F1 | Samples |
+|---|---|---|---|
+| GPT-5.1 | 0.881 | 0.840 | 362 |
+| Claude Sonnet 4.5 | 0.861 | 0.806 | 337 |
+| WildJailbreak (synthetic) | 1.000 | 1.000 | 160 |
+
+WildJailbreak samples are single-class (all successful jailbreaks), so perfect scores on that subset reflect label homogeneity, not special discriminative performance. Real-world generalization is measured by the GPT-5.1 and Claude rows.
+
+**Statistical Significance**
+
+Binomial test against 33.3% random baseline: accuracy 90.9% vs. baseline 33.3%, p < 0.001, Cohen's h = 1.298 (large effect).
+
+**Adversarial Robustness**
+
+| Condition | F1 |
+|---|---|
+| Original inputs | 0.918 |
+| Paraphrased inputs | 0.859 |
+| F1 drop | 6.5% |
+
+A 6.5% drop under synonym replacement and structural paraphrase attacks is acceptable for production deployment. Three paraphrase dimensions are tested: synonym replacement, sentence restructuring, and compression. A fourth dimension (formality shifting) was explicitly excluded because changing formality frequently alters the semantic meaning of a borderline request, producing label noise rather than a valid robustness test.
+
+---
+
+### Jailbreak Detector (Binary)
+
+**Overall**
+
+| Metric | Value |
+|---|---|
+| Accuracy | 99.77% |
+| Macro F1 | 0.9962 |
+| Weighted F1 | 0.9977 |
+| Cohen's Kappa | 0.9924 |
+| Matthews Corrcoef | 0.9924 |
+| Log Loss | 0.0249 |
+
+**Per-Class**
+
+| Class | Precision | Recall | F1 | Support |
+|---|---|---|---|---|
+| Jailbreak Failed | 0.999 | 0.999 | 0.999 | 698 |
+| Jailbreak Succeeded | 0.994 | 0.994 | 0.994 | 161 |
+
+**Security-Critical Metrics**
+
+| Metric | Value |
+|---|---|
+| False Negative Rate | 0.6% |
+| True Negative Rate | 99.9% |
+| Recall (Jailbreak Succeeded) | 99.4% |
+| Minimum Recall Threshold (enforced) | 95.0% |
+
+False negatives are the primary risk: a missed jailbreak means a safety bypass goes undetected. The pipeline enforces a minimum recall threshold of 95% on the Jailbreak Succeeded class -- training is considered failed if this is not met. The achieved recall of 99.4% exceeds this threshold by 4.4 percentage points. FNR of 0.6% (1 missed jailbreak out of 161) represents strong security performance.
+
+**Calibration**
+
+| Metric | Value | Interpretation |
+|---|---|---|
+| ECE | 0.003 | Excellent -- confidence scores are reliable |
+| MCE | 0.003 | Excellent |
+| Brier Score | 0.004 | Near-perfect |
+
+**WildJailbreak Supplementation Impact**
+
+| Evaluation Set | Accuracy | Macro F1 |
+|---|---|---|
+| Real responses only (n=699) | 0.999 | 0.741 |
+| Real + Synthetic (n=859) | 0.998 | 0.996 |
+| Difference | -0.001 | +0.255 |
+
+Modern LLMs (Claude Sonnet 4.5, GPT-5.1) have strong safety guardrails and rarely produce successful jailbreaks in practice. Claude Sonnet 4.5 produced 0 jailbreak successes across 337 samples; GPT-5.1 produced 1 out of 362. Without supplementation from WildJailbreak, the detector has near-zero positive training examples and collapses to near-random F1 (~0.74) despite high accuracy. The +0.255 F1 gain demonstrates that WildJailbreak supplementation is necessary, not optional.
+
+**Per-Model Generalization Note**
+
+GPT-5.1 reports Macro F1 = 0.499 in per-model breakdown. This is an artifact of having only 1 jailbreak success out of 362 GPT-5.1 samples -- Macro F1 is undefined for a near-single-class subset and should not be interpreted as poor classifier performance. Claude Sonnet 4.5 (337 samples, 0 successes) scores perfectly because all predictions are trivially correct for a single-class subset.
+
+**Data Composition**
+
+| Source | Type | Samples | % |
+|---|---|---|---|
+| Claude Sonnet 4.5 | Real | 337 | 39.2% |
+| GPT-5.1 | Real | 362 | 42.1% |
+| WildJailbreak | Synthetic | 160 | 18.6% |
+
+Total WildJailbreak samples used across all splits (train/val/test): 973.
+
+**Statistical Significance**
+
+Binomial test against 50% random baseline: accuracy 99.8% vs. baseline 50.0%, p < 0.001, Cohen's h = 1.474 (large effect).
+
+**Classifier Independence**
+
+Agreement rate between the two classifiers: 51.8%. This low correlation is the empirical justification for the dual-model design -- the jailbreak detector and refusal classifier capture distinct signal. A jailbreak can succeed even when the refusal classifier detects a Soft Refusal (partial compliance), and a Hard Refusal does not guarantee jailbreak failure. Neither classifier's output is derivable from the other.
 
 ---
 
@@ -617,7 +633,7 @@ The pipeline detects its environment via `IS_AWS` (set in `02-Setup.py`). On AWS
 | Mode | Entry Point | Description |
 |---|---|---|
 | Quick Test | `python 32-Execute.py --test` | Reduced dataset, full 5-fold CV, end-to-end validation |
-| Full Experiment | `python 32-Execute.py --full` | Complete dataset, full pipeline Steps 1-10 |
+| Full Experiment | `python 32-Execute.py --full` | Complete dataset, full pipeline Steps 1-11 |
 | Analyze Only | `python 32-Execute.py --analyze-only [refusal.pt] [jailbreak.pt]` | Load checkpoints, run all analyses, no retraining |
 | Interactive | `python 32-Execute.py` | Menu-driven mode selection |
 
@@ -725,7 +741,7 @@ Retraining data is assembled using a three-tier retention strategy to balance re
 ├── 27-ErrorAnalysis.py         # 7-module error analysis with high-confidence failure extraction
 ├── 28-Visualizer.py            # Matplotlib/Seaborn plots (confusion matrix, F1, robustness, heatmaps)
 ├── 29-ReportGenerator.py       # ReportLab PDF report generation (performance, monitoring, executive)
-├── 30-RefusalPipeline.py       # 10-step pipeline orchestrator with smart model detection
+├── 30-RefusalPipeline.py       # 11-step pipeline orchestrator with smart model detection
 ├── 31-ExperimentRunner.py      # Four execution modes with checkpoint-aware resume logic
 ├── 32-Execute.py               # CLI entry point (--test, --full, --analyze-only, interactive)
 ├── 33-Analyze.py               # Standalone analysis CLI with --generate-report and report-type selection
@@ -739,16 +755,15 @@ Retraining data is assembled using a three-tier retention strategy to balance re
 
 ## Citation
 
-If you use the WildJailbreak dataset in your work, please cite:
+If you use the WildJailbreak dataset in your work, please cite (dataset license: Apache 2.0):
 
 ```bibtex
-@misc{wildteaming2024,
+@inproceedings{jiang2025wildteaming,
   title={WildTeaming at Scale: From In-the-Wild Jailbreaks to (Adversarially) Safer Language Models},
   author={Liwei Jiang and Kavel Rao and Seungju Han and Allyson Ettinger and Faeze Brahman and Sachin Kumar and Niloofar Mireshghallah and Ximing Lu and Maarten Sap and Yejin Choi and Nouha Dziri},
-  year={2024},
-  eprint={2406.18510},
-  archivePrefix={arXiv},
-  primaryClass={cs.CL},
+  booktitle={Advances in Neural Information Processing Systems (NeurIPS)},
+  volume={38},
+  year={2025},
   url={https://arxiv.org/abs/2406.18510}
 }
 ```
