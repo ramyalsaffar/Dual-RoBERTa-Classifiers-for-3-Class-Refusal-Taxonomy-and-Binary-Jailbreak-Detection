@@ -5,11 +5,13 @@
 ![Transformers](https://img.shields.io/badge/Transformers-4.57.1-yellow?logo=huggingface)
 ![RoBERTa](https://img.shields.io/badge/Model-RoBERTa-orange)
 ![GPT-4o](https://img.shields.io/badge/Judge-GPT--4o-412991?logo=openai)
+![Claude Sonnet 4.5](https://img.shields.io/badge/Evaluated-Claude%20Sonnet%204.5-CC785C?logo=anthropic)
+![GPT-5.1](https://img.shields.io/badge/Evaluated-GPT--5.1-412991?logo=openai)
 ![FastAPI](https://img.shields.io/badge/API-FastAPI-009688?logo=fastapi)
 ![PostgreSQL](https://img.shields.io/badge/DB-PostgreSQL-4169E1?logo=postgresql)
 ![License](https://img.shields.io/badge/License-Research-green)
 
-Two independently fine-tuned RoBERTa classifiers for AI safety research: a 3-class refusal taxonomy model (No Refusal / Hard Refusal / Soft Refusal) and a binary jailbreak success detector, trained on responses from frontier LLMs with GPT-4o-labeled ground truth.
+Two independently fine-tuned RoBERTa classifiers for AI safety research: a 3-class refusal taxonomy model (No Refusal / Hard Refusal / Soft Refusal) and a binary jailbreak success detector, trained on responses collected from Claude Sonnet 4.5 and GPT-5.1 and labeled by a GPT-4o judge.
 
 ---
 
