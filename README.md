@@ -3,6 +3,10 @@
 ![Python](https://img.shields.io/badge/Python-3.10+-blue?logo=python)
 ![PyTorch](https://img.shields.io/badge/PyTorch-2.9.0-red?logo=pytorch)
 ![Transformers](https://img.shields.io/badge/Transformers-4.57.1-yellow?logo=huggingface)
+![RoBERTa](https://img.shields.io/badge/Model-RoBERTa-orange)
+![GPT-4o](https://img.shields.io/badge/Judge-GPT--4o-412991?logo=openai)
+![FastAPI](https://img.shields.io/badge/API-FastAPI-009688?logo=fastapi)
+![PostgreSQL](https://img.shields.io/badge/DB-PostgreSQL-4169E1?logo=postgresql)
 ![License](https://img.shields.io/badge/License-Research-green)
 
 Two independently fine-tuned RoBERTa classifiers for AI safety research: a 3-class refusal taxonomy model (No Refusal / Hard Refusal / Soft Refusal) and a binary jailbreak success detector, trained on responses from frontier LLMs with GPT-4o-labeled ground truth.
