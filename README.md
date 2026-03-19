@@ -7,7 +7,7 @@
 ![GPT-4o](https://img.shields.io/badge/Judge-GPT--4o-412991?logo=openai)
 ![Claude Sonnet 4.5](https://img.shields.io/badge/Evaluated-Claude%20Sonnet%204.5-CC785C?logo=anthropic)
 ![GPT-5.1](https://img.shields.io/badge/Evaluated-GPT--5.1-412991?logo=openai)
-![FastAPI](https://img.shields.io/badge/API-FastAPI-009688?logo=fastapi)
+![FastAPI](https://img.shields.io/badge/Production%20Ready-FastAPI-009688?logo=fastapi)
 ![PostgreSQL](https://img.shields.io/badge/DB-PostgreSQL-4169E1?logo=postgresql)
 ![License](https://img.shields.io/badge/License-Research-green)
 
@@ -667,11 +667,11 @@ For Spyder users: open and execute `01-Imports.py`. All 37 modules load in seque
 
 ## Production Infrastructure
 
-Files `34-ProductionAPI.py`, `35-MonitoringSystem.py`, `36-RetrainingPipeline.py`, and `37-DataManager.py` form a complete production stack.
+Files `34-ProductionAPI.py`, `35-MonitoringSystem.py`, `36-RetrainingPipeline.py`, and `37-DataManager.py` form a production-ready stack designed for deployment. The code is fully implemented but has not been deployed -- it represents the planned production path for these classifiers.
 
 ### FastAPI Inference Server
 
-`34-ProductionAPI.py` serves real-time inference via FastAPI (uvicorn). Endpoints:
+`34-ProductionAPI.py` implements a real-time inference server using FastAPI (uvicorn). When deployed, it exposes the following endpoints:
 
 | Endpoint | Method | Description |
 |---|---|---|
@@ -682,15 +682,15 @@ Files `34-ProductionAPI.py`, `35-MonitoringSystem.py`, `36-RetrainingPipeline.py
 | `/admin/promote-challenger` | POST | Promote challenger to active (requires admin API key) |
 | `/admin/rollback` | POST | Stop A/B test and remove challenger (requires admin API key) |
 
-All predictions are logged to PostgreSQL asynchronously via FastAPI `BackgroundTasks` so logging does not add to inference latency.
+All predictions are designed to be logged to PostgreSQL asynchronously via FastAPI `BackgroundTasks` so logging does not add to inference latency.
 
 ### A/B Testing
 
-New model versions are deployed as challengers, not immediately promoted. Traffic is split by random draw: a configurable percentage of requests go to the challenger, the remainder to the active model. The gradual rollout stages are [5%, 25%, 50%, 100%]. Each stage is manually approved via the `/admin/promote-challenger` endpoint. The challenger can be rolled back at any stage without downtime.
+The A/B testing system is designed so new model versions are deployed as challengers, not immediately promoted. Traffic is split by random draw: a configurable percentage of requests go to the challenger, the remainder to the active model. The gradual rollout stages are [5%, 25%, 50%, 100%]. Each stage is manually approved via the `/admin/promote-challenger` endpoint. The challenger can be rolled back at any stage without downtime.
 
 ### Drift Detection and Monitoring
 
-`35-MonitoringSystem.py` runs a two-tier escalating check using the same GPT-4o judge from training as the ground truth signal -- production monitoring does not require labeled data.
+`35-MonitoringSystem.py` implements a two-tier escalating check using the same GPT-4o judge from training as the ground truth signal -- production monitoring would not require labeled data.
 
 **Daily check (small sample):**
 - Samples recent predictions, re-labels them with GPT-4o
@@ -700,17 +700,17 @@ New model versions are deployed as challengers, not immediately promoted. Traffi
 **Escalated check (large sample, 7-day window):**
 - Above 20% disagreement: trigger automated retraining
 
-All monitoring runs (sample size, disagreement rate, action taken) are logged to PostgreSQL for trend analysis.
+All monitoring runs (sample size, disagreement rate, action taken) are designed to be logged to PostgreSQL for trend analysis.
 
 ### Automated Retraining
 
-`36-RetrainingPipeline.py` is triggered when the escalated check exceeds the 20% retraining threshold. It runs six steps: collect retraining data from the database, prepare train/val/test splits, train a new model warm-started from the current production weights (lower LR, fewer frozen layers to allow more adaptation), validate the new model must meet minimum F1 and confidence thresholds, save the checkpoint, and deploy as an A/B challenger at 5% traffic.
+`36-RetrainingPipeline.py` is designed to be triggered when the escalated check exceeds the 20% retraining threshold. It implements six steps: collect retraining data from the database, prepare train/val/test splits, train a new model warm-started from the current production weights (lower LR, fewer frozen layers to allow more adaptation), validate the new model must meet minimum F1 and confidence thresholds, save the checkpoint, and deploy as an A/B challenger at 5% traffic.
 
 ### Data Retention and PostgreSQL Schema
 
-`37-DataManager.py` manages three PostgreSQL tables: `predictions_log` (every inference call -- prompt, response, prediction, confidence, latency, judge label when available), `monitoring_runs` (history of all drift detection checks), and `model_versions` (registry of every deployed model with active/challenger flags and traffic percentages).
+`37-DataManager.py` defines three PostgreSQL tables: `predictions_log` (every inference call -- prompt, response, prediction, confidence, latency, judge label when available), `monitoring_runs` (history of all drift detection checks), and `model_versions` (registry of every deployed model with active/challenger flags and traffic percentages).
 
-Retraining data is assembled using a three-tier retention strategy to balance recency and volume: recent data (last 7 days, 100% of problematic samples + 20% of correct samples), medium-term data (7-30 days, 50% stratified sample), long-term data (30-180 days, 10% representative sample). Chi-square tests validate class balance at each tier before retraining begins.
+Retraining data is designed to be assembled using a three-tier retention strategy to balance recency and volume: recent data (last 7 days, 100% of problematic samples + 20% of correct samples), medium-term data (7-30 days, 50% stratified sample), long-term data (30-180 days, 10% representative sample). Chi-square tests validate class balance at each tier before retraining begins.
 
 ---
 
